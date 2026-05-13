@@ -141,6 +141,33 @@ jobs:
             echo "injected RODIN_SUSFS_UNCOND via awk"
           fi
           grep -n "RODIN_SUSFS_UNCOND\|susfs_def.h\|CL_COPY_MNT_NS" fs/namespace.c | head -10
+          # ---- POST-PATCH SOURCE SURGERY ----
+          # 1) Rewrite susfs my_write_*'s _with_policy calls to non-_with_policy variants
+          #    (Xiaomi vendor kernel does not export _with_policy versions)
+          sed -i 's/security_context_to_sid_with_policy(\(.*\), policy)/security_context_to_sid(\1)/g' security/selinux/selinuxfs.c
+          sed -i 's/security_sid_to_context_with_policy(\(.*\), policy)/security_sid_to_context(\1)/g'  security/selinux/selinuxfs.c
+          sed -i 's/security_compute_av_user_with_policy(\(.*\), policy)/security_compute_av_user(\1)/g' security/selinux/selinuxfs.c
+          # also drop any leftover "policy = ..." lines in those susfs functions
+          sed -i '/struct selinux_policy \*policy/d' security/selinux/selinuxfs.c
+          # 2) Provide ksu_is_init_rc_hook_enabled stub (Wild_KSU doesn'\''t define it)
+          if ! grep -rq "DEFINE_STATIC_KEY.*ksu_is_init_rc_hook_enabled" .; then
+            cat > fs/rodin_ksu_stubs.c <<'STUBEOF'
+          #include <linux/jump_label.h>
+          #include <linux/export.h>
+          DEFINE_STATIC_KEY_FALSE(ksu_is_init_rc_hook_enabled);
+          EXPORT_SYMBOL_GPL(ksu_is_init_rc_hook_enabled);
+          void __attribute__((cold)) ksu_handle_sys_read(unsigned int fd) { (void)fd; }
+          EXPORT_SYMBOL_GPL(ksu_handle_sys_read);
+          STUBEOF
+            # strip leading indent (heredoc had 10 spaces)
+            sed -i '''s/^          //''' fs/rodin_ksu_stubs.c
+            grep -q "rodin_ksu_stubs" fs/Makefile || echo "obj-y += rodin_ksu_stubs.o" >> fs/Makefile
+            echo "added rodin_ksu_stubs.c"
+          fi
+          echo "=== sanity post-surgery ==="
+          grep -n "_with_policy" security/selinux/selinuxfs.c | head -3 || echo "no _with_policy left"
+          ls -la fs/rodin_ksu_stubs.c 2>&1
+          tail -2 fs/Makefile
           # sanity: confirm key symbols present
           grep -n "susfs_is_current_ksu_domain\|susfs_is_sdcard_android_data_not_decrypted" fs/namespace.c | head -5
           grep -n "bypass_orig_flow" fs/namespace.c | head -5
