@@ -56,6 +56,19 @@ jobs:
           git clone --depth=1 -b "${KERNEL_BRANCH}" "${KERNEL_REPO}" common
           echo "=== OPPO kernel version (should be 6.6.89) ==="
           head -6 common/Makefile
+          # OPPO references rust/1.73.0c which is not in the GKI manifest.
+          # Replace with the standard rust prebuilt that the manifest provides, or remove.
+          echo "=== rust refs in BUILD.bazel ==="
+          grep -n "rust/linux-x86" common/BUILD.bazel | head
+          # Standard android15-6.6 manifest has prebuilts/rust/linux-x86/<version>
+          # Find what is available
+          ls prebuilts/rust/linux-x86/ 2>/dev/null
+          # Substitute 1.73.0c with whatever the manifest provides
+          AVAIL=$(ls prebuilts/rust/linux-x86/ 2>/dev/null | head -1)
+          if [ -n "$AVAIL" ] && [ "$AVAIL" != "1.73.0c" ]; then
+            echo "replacing 1.73.0c with $AVAIL"
+            sed -i "s|prebuilts/rust/linux-x86/1.73.0c|prebuilts/rust/linux-x86/$AVAIL|g" common/BUILD.bazel
+          fi
 
       - name: Clean dirty flags
         run: |
