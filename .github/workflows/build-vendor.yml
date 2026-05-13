@@ -119,15 +119,28 @@ jobs:
             for r in $REMAINING; do echo "--- $r ---"; cat "$r"; done
             exit 1
           fi
-          # NUCLEAR FIX: inject unconditional declarations at top of namespace.c.
-          # Avoid Python heredoc (broke YAML block scalar). Use pure shell.
+          # NUCLEAR FIX: inject unconditional declarations at top of namespace.c via awk
           if ! grep -q 'RODIN_SUSFS_UNCOND' fs/namespace.c; then
-            INJ='\n/* RODIN_SUSFS_UNCOND */\n#include <linux\/susfs_def.h>\n#ifndef CL_COPY_MNT_NS\n#define CL_COPY_MNT_NS BIT(25)\n#endif\nextern bool susfs_is_current_ksu_domain(void);\nextern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;\nextern struct static_key_true ksu_su_compat_enabled;\n/* END RODIN_SUSFS_UNCOND */\n'
-            # Insert AFTER the first occurrence of #include "internal.h"
-            sed -i "0,/^#include \"internal.h\"$/{s||#include \"internal.h\"\\$INJ|}" fs/namespace.c
-            echo "injected RODIN_SUSFS_UNCOND"
+            awk '
+              /^#include "internal.h"$/ && !done {
+                print
+                print "/* RODIN_SUSFS_UNCOND */"
+                print "#include <linux/susfs_def.h>"
+                print "#ifndef CL_COPY_MNT_NS"
+                print "#define CL_COPY_MNT_NS BIT(25)"
+                print "#endif"
+                print "extern bool susfs_is_current_ksu_domain(void);"
+                print "extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;"
+                print "extern struct static_key_true ksu_su_compat_enabled;"
+                print "/* END RODIN_SUSFS_UNCOND */"
+                done=1
+                next
+              }
+              { print }
+            ' fs/namespace.c > /tmp/ns.c && mv /tmp/ns.c fs/namespace.c
+            echo "injected RODIN_SUSFS_UNCOND via awk"
           fi
-          grep -n "RODIN_SUSFS_UNCOND\|susfs_def.h" fs/namespace.c | head -5
+          grep -n "RODIN_SUSFS_UNCOND\|susfs_def.h\|CL_COPY_MNT_NS" fs/namespace.c | head -10
           # sanity: confirm key symbols present
           grep -n "susfs_is_current_ksu_domain\|susfs_is_sdcard_android_data_not_decrypted" fs/namespace.c | head -5
           grep -n "bypass_orig_flow" fs/namespace.c | head -5
