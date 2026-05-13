@@ -65,6 +65,10 @@ jobs:
           # apply manager_hash.patch
           curl -sSL -o /tmp/manager_hash.patch "https://raw.githubusercontent.com/ahmed-alnassif/GKI-Duchamp/main/patches/manager_hash.patch"
           ( cd Wild_KSU && patch -p1 --fuzz=3 < /tmp/manager_hash.patch ) || true
+          # Wild_KSU unconditionally includes <linux/susfs.h>; copy headers only
+          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android15-6.6 /tmp/susfs4ksu
+          cp -v /tmp/susfs4ksu/kernel_patches/include/linux/susfs.h     common/include/linux/
+          cp -v /tmp/susfs4ksu/kernel_patches/include/linux/susfs_def.h common/include/linux/
 
       - name: Minimal config fragment (KSU only, NO SuSFS)
         run: |
