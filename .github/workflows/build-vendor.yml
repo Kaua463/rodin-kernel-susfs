@@ -96,8 +96,10 @@ jobs:
           # SINGLE patch invocation with --fuzz=3 and --forward (skip already-applied hunks).
           # No chained fallback — that was double-applying and causing duplicate labels.
           cd common
+          set +e
           patch -p1 --fuzz=3 --forward --no-backup-if-mismatch < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch
           PATCH_RC=$?
+          set -e
           echo "patch exit=$PATCH_RC"
           # tolerate rejections in task_mmu.c (only affects SUS_MAP feature, which we don't enable)
           REJ=$(find . -name '*.rej' 2>/dev/null)
