@@ -155,7 +155,25 @@ jobs:
           /* === Wild_KSU missing symbol === */
           DEFINE_STATIC_KEY_FALSE(ksu_is_init_rc_hook_enabled);
           EXPORT_SYMBOL_GPL(ksu_is_init_rc_hook_enabled);
+          DEFINE_STATIC_KEY_FALSE(ksu_is_input_hook_enabled);
+          EXPORT_SYMBOL_GPL(ksu_is_input_hook_enabled);
           /* ksu_handle_sys_read is defined by Wild_KSU/kernel/ksud.c, do not duplicate */
+
+          /* ksu_selinux_hide_running: bool used by my_write_* in selinuxfs.c.
+           * Default false = don't hide. SuSFS configures via separate prctl path.
+           */
+          bool ksu_selinux_hide_running __read_mostly = false;
+          EXPORT_SYMBOL_GPL(ksu_selinux_hide_running);
+
+          /* backup_sepolicy: susfs's backup selinux_policy pointer. Null in our build. */
+          struct selinux_policy *backup_sepolicy = NULL;
+          EXPORT_SYMBOL_GPL(backup_sepolicy);
+
+          /* susfs_run_sus_path_loop: defined as static in susfs.c, but referenced
+           * externally by patch. No-op here — SUS_PATH_LOOP feature not used.
+           */
+          void susfs_run_sus_path_loop(void) {}
+          EXPORT_SYMBOL_GPL(susfs_run_sus_path_loop);
 
           /* === SELinux _with_policy stubs ===
            * Xiaomi's vendor kernel is older and doesn't export the *_with_policy
