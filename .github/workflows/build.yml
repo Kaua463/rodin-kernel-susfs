@@ -9,10 +9,6 @@ on:
       susfs_branch:
         description: "SuSFS branch"
         default: "gki-android15-6.6"
-  push:
-    paths:
-      - ".github/workflows/build.yml"
-      - "rodin.fragment"
 
 env:
   GKI_MANIFEST_BRANCH: common-android15-6.6
