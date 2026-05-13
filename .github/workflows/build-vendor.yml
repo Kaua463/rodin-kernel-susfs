@@ -155,8 +155,7 @@ jobs:
           /* === Wild_KSU missing symbol === */
           DEFINE_STATIC_KEY_FALSE(ksu_is_init_rc_hook_enabled);
           EXPORT_SYMBOL_GPL(ksu_is_init_rc_hook_enabled);
-          void __attribute__((cold)) ksu_handle_sys_read(unsigned int fd) { (void)fd; }
-          EXPORT_SYMBOL_GPL(ksu_handle_sys_read);
+          /* ksu_handle_sys_read is defined by Wild_KSU/kernel/ksud.c, do not duplicate */
 
           /* === SELinux _with_policy stubs ===
            * Xiaomi's vendor kernel is older and doesn't export the *_with_policy
