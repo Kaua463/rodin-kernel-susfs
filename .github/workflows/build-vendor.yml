@@ -120,34 +120,12 @@ jobs:
             exit 1
           fi
           # NUCLEAR FIX: inject unconditional declarations at top of namespace.c.
-          # The susfs patches gate everything in #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-          # but Xiaomi's source confuses the ifdef matching. Just declare unconditionally.
-          # The actual code that USES these symbols stays gated, so if the config is off,
-          # the externs are dead-letter. With config on, everything is in scope.
-          if ! grep -q '^/\* RODIN_SUSFS_UNCOND \*/' fs/namespace.c; then
-            python3 - <<'PYDONE'
-import re
-p="fs/namespace.c"
-src=open(p).read()
-inj = """/* RODIN_SUSFS_UNCOND */
-#include <linux/susfs_def.h>
-#ifndef CL_COPY_MNT_NS
-#define CL_COPY_MNT_NS BIT(25)
-#endif
-extern bool susfs_is_current_ksu_domain(void);
-extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;
-extern struct static_key_true ksu_su_compat_enabled;
-/* END RODIN_SUSFS_UNCOND */
-
-"""
-# insert AFTER the last #include and before code starts
-m = re.search(r'(#include\s+"internal\.h"\s*\n)', src)
-if not m:
-    m = re.search(r'(#include\s+<[^>]+>\s*\n)(?!.*#include)', src, re.DOTALL)
-src = src[:m.end()] + "\n" + inj + src[m.end():]
-open(p, "w").write(src)
-print("RODIN_SUSFS_UNCOND injected")
-PYDONE
+          # Avoid Python heredoc (broke YAML block scalar). Use pure shell.
+          if ! grep -q 'RODIN_SUSFS_UNCOND' fs/namespace.c; then
+            INJ='\n/* RODIN_SUSFS_UNCOND */\n#include <linux\/susfs_def.h>\n#ifndef CL_COPY_MNT_NS\n#define CL_COPY_MNT_NS BIT(25)\n#endif\nextern bool susfs_is_current_ksu_domain(void);\nextern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;\nextern struct static_key_true ksu_su_compat_enabled;\n/* END RODIN_SUSFS_UNCOND */\n'
+            # Insert AFTER the first occurrence of #include "internal.h"
+            sed -i "0,/^#include \"internal.h\"$/{s||#include \"internal.h\"\\$INJ|}" fs/namespace.c
+            echo "injected RODIN_SUSFS_UNCOND"
           fi
           grep -n "RODIN_SUSFS_UNCOND\|susfs_def.h" fs/namespace.c | head -5
           # sanity: confirm key symbols present
