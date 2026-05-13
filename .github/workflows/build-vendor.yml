@@ -93,12 +93,23 @@ jobs:
           git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android15-6.6
           cp -v susfs4ksu/kernel_patches/fs/* common/fs/
           cp -v susfs4ksu/kernel_patches/include/linux/* common/include/linux/
-          # apply main GKI susfs patch — may need fuzz because Xiaomi added MTK lines
-          ( cd common && patch -p1 --no-backup-if-mismatch < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch ) || \
-          ( cd common && patch -p1 --fuzz=5 --no-backup-if-mismatch < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch ) || \
-          echo "::warning::susfs kernel patch had conflicts; check rej files"
-          # list any rejected patches
-          find common -name '*.rej' 2>/dev/null | head
+          # SINGLE patch invocation with --fuzz=3 and --forward (skip already-applied hunks).
+          # No chained fallback — that was double-applying and causing duplicate labels.
+          cd common
+          patch -p1 --fuzz=3 --forward --no-backup-if-mismatch < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch
+          PATCH_RC=$?
+          echo "patch exit=$PATCH_RC"
+          # any rejects?
+          REJ=$(find . -name '*.rej' 2>/dev/null)
+          if [ -n "$REJ" ]; then
+            echo "::error::susfs patch left .rej files:"
+            for r in $REJ; do echo "--- $r ---"; cat "$r"; done
+            exit 1
+          fi
+          [ $PATCH_RC -ne 0 ] && exit 1
+          # sanity: confirm key symbols present
+          grep -n "susfs_is_current_ksu_domain\|susfs_is_sdcard_android_data_not_decrypted" fs/namespace.c | head -5
+          grep -n "bypass_orig_flow" fs/namespace.c | head -5
 
       - name: Place config fragment
         run: |
