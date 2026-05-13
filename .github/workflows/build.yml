@@ -73,15 +73,23 @@ jobs:
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${{ github.event.inputs.ksu_branch || 'next' }}/kernel/setup.sh" | bash -s "${{ github.event.inputs.ksu_branch || 'next' }}"
           ls -la KernelSU-Next || true
 
-      - name: Apply SuSFS (kernel side)
+      - name: Apply SuSFS patches
         run: |
           cd kernel_workspace
           git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b "${{ github.event.inputs.susfs_branch || 'gki-android15-6.6' }}"
+          # 1) patch KernelSU-Next to add CONFIG_KSU_SUSFS* Kconfig entries
+          cp -v susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch KernelSU-Next/
+          ( cd KernelSU-Next && patch -p1 < 10_enable_susfs_for_ksu.patch ) || \
+          ( cd KernelSU-Next && patch -p1 --fuzz=3 < 10_enable_susfs_for_ksu.patch ) || \
+          echo "::warning::KSU-Next susfs patch did not apply cleanly"
+          # 2) copy susfs fs/ and include/ files into common kernel
           cp -v susfs4ksu/kernel_patches/fs/* common/fs/
           cp -v susfs4ksu/kernel_patches/include/linux/* common/include/linux/
-          cd common
-          patch -p1 < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch || \
-          patch -p1 --fuzz=3 < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch
+          # 3) patch the GKI common kernel
+          ( cd common && patch -p1 < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch ) || \
+          ( cd common && patch -p1 --fuzz=3 < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch )
+          # show what KSU-Next Kconfig now offers
+          grep -n "KSU_SUSFS\|config KSU" KernelSU-Next/kernel/Kconfig | head -40 || true
 
       - name: Place config fragment
         run: |
