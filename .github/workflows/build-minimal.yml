@@ -1,0 +1,115 @@
+name: Build minimal kernel (rodin, KSU only - diagnostic)
+
+# Diagnostic build: Xiaomi vendor source + Wild_KSU + NO SuSFS.
+# Used to isolate whether SuSFS is the cause of bootloop.
+# If THIS boots → SuSFS is the issue. If not → 6.6.30/6.6.89 mismatch.
+
+on:
+  workflow_dispatch:
+
+env:
+  GKI_MANIFEST_BRANCH: common-android15-6.6
+  XIAOMI_BRANCH: bsp-rodin-v-oss
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git curl wget bc bison flex libssl-dev make gcc \
+            libelf-dev build-essential python3 python3-pip \
+            zip unzip rsync cpio ccache lz4 zstd perl
+          mkdir -p "$HOME/bin"
+          curl -sSL https://storage.googleapis.com/git-repo-downloads/repo > "$HOME/bin/repo"
+          chmod a+x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          git config --global user.name "ci"
+          git config --global user.email "ci@local"
+
+      - name: Sync GKI build infrastructure
+        run: |
+          mkdir -p ws && cd ws
+          repo init --depth=1 -u https://android.googlesource.com/kernel/manifest -b "${GKI_MANIFEST_BRANCH}"
+          repo sync -c -j"$(nproc)" --no-tags --no-clone-bundle --fail-fast
+
+      - name: Replace common/ with Xiaomi rodin source
+        run: |
+          cd ws
+          rm -rf common
+          git clone --depth=1 -b "${XIAOMI_BRANCH}" https://github.com/MiCode/Xiaomi_Kernel_OpenSource common
+          head -6 common/Makefile
+
+      - name: Clean dirty flags + protected exports
+        run: |
+          cd ws
+          sed -i 's/-dirty//g; s/ -dirty//g' common/scripts/setlocalversion || true
+          sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" build/kernel/kleaf/impl/stamp.bzl 2>/dev/null || true
+          rm -rf common/android/abi_gki_protected_exports_* || true
+          perl -pi -e 's/^\s*"protected_exports_list"\s*:\s*"android\/abi_gki_protected_exports_aarch64",\s*$//;' common/BUILD.bazel
+          perl -pi -e 's/^\s*"protected_exports_list"\s*:\s*"android\/abi_gki_protected_exports_x86_64",\s*$//;' common/BUILD.bazel
+
+      - name: Integrate Wild_KSU (canary) ONLY - no SuSFS
+        run: |
+          cd ws
+          curl -LSs "https://raw.githubusercontent.com/WildKernels/Wild_KSU/canary/kernel/setup.sh" | bash -s canary
+          # apply manager_hash.patch
+          curl -sSL -o /tmp/manager_hash.patch "https://raw.githubusercontent.com/ahmed-alnassif/GKI-Duchamp/main/patches/manager_hash.patch"
+          ( cd Wild_KSU && patch -p1 --fuzz=3 < /tmp/manager_hash.patch ) || true
+
+      - name: Minimal config fragment (KSU only, NO SuSFS)
+        run: |
+          cd ws
+          cat > common/arch/arm64/configs/rodin-min.fragment <<'EOF'
+          CONFIG_KSU=y
+          CONFIG_NET_SCH_CAKE=y
+          EOF
+          cat common/arch/arm64/configs/rodin-min.fragment
+
+      - name: Build (Kleaf)
+        run: |
+          cd ws
+          tools/bazel build --config=fast \
+            --defconfig_fragment=//common:arch/arm64/configs/rodin-min.fragment \
+            //common:kernel_aarch64 2>&1 | tail -30
+          mkdir -p "$GITHUB_WORKSPACE/out_dist"
+          IMG=$(find -L bazel-bin -name Image -path '*kernel_aarch64*' | head -1)
+          [ -z "$IMG" ] && IMG=$(find -L bazel-bin -name Image | head -1)
+          test -n "$IMG"
+          cp -v "$IMG" "$GITHUB_WORKSPACE/out_dist/Image"
+
+      - name: Repack boot.img
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          MAGISK_VER=$(curl -sSL https://api.github.com/repos/topjohnwu/Magisk/releases/latest | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)
+          curl -sSL -o magisk.apk "https://github.com/topjohnwu/Magisk/releases/download/${MAGISK_VER}/Magisk-${MAGISK_VER}.apk"
+          unzip -o magisk.apk "lib/x86_64/libmagiskboot.so" -d magisk_extract
+          cp magisk_extract/lib/x86_64/libmagiskboot.so magiskboot
+          chmod +x magiskboot
+          mkdir repack && cd repack
+          cp ../stock_boot.img boot.img
+          ../magiskboot unpack boot.img
+          cp ../out_dist/Image kernel
+          ../magiskboot repack boot.img boot_new.img
+          mv boot_new.img ../boot_new_minimal.img
+          cd ..
+          ls -la boot_new_minimal.img
+          strings boot_new_minimal.img | grep -m1 "Linux version" || true
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimal-${{ github.run_number }}
+          path: |
+            boot_new_minimal.img
+            out_dist/Image
+          retention-days: 14
