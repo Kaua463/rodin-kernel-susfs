@@ -70,11 +70,22 @@ jobs:
           perl -pi -e 's/^\s*"protected_exports_list"\s*:\s*"android\/abi_gki_protected_exports_x86_64",\s*$//;'   common/BUILD.bazel
           ! grep -q '"protected_exports_list".*"android/abi_gki_protected_exports' common/BUILD.bazel
 
-      - name: Integrate KernelSU-Next (pershoot next-susfs - susfs pre-integrated)
+      - name: Integrate Wild_KSU (canary - susfs-compatible signatures)
         run: |
           cd ws
-          curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/${{ github.event.inputs.ksu_branch || 'next-susfs' }}/kernel/setup.sh" | bash -s "${{ github.event.inputs.ksu_branch || 'next-susfs' }}"
-          ls -la KernelSU-Next || true
+          # Wild_KSU has core_hook.c with signatures matching simonpunk susfs4ksu v2.1.0.
+          # This is the combo used by ahmed-alnassif/GKI-Duchamp (proven working for MTK).
+          curl -LSs "https://raw.githubusercontent.com/WildKernels/Wild_KSU/canary/kernel/setup.sh" | bash -s canary
+          # the setup creates KernelSU-Next/ symlink; the dir is Wild_KSU though
+          ls -la KernelSU-Next Wild_KSU 2>&1 | head
+          # download manager_hash.patch (lets the standard KSU-Next manager work with Wild_KSU)
+          curl -sSL -o /tmp/manager_hash.patch "https://raw.githubusercontent.com/ahmed-alnassif/GKI-Duchamp/main/patches/manager_hash.patch"
+          for D in Wild_KSU KernelSU-Next; do
+            if [ -d "$D" ]; then
+              ( cd "$D" && patch -p1 --fuzz=3 < /tmp/manager_hash.patch ) || true
+              break
+            fi
+          done
 
       - name: Apply SuSFS kernel-side patch
         run: |
