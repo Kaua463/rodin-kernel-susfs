@@ -1,0 +1,203 @@
+name: Build Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      ksu_branch:
+        description: "KernelSU-Next branch"
+        default: "next"
+      susfs_branch:
+        description: "SuSFS branch"
+        default: "gki-android15-6.6"
+  push:
+    paths:
+      - ".github/workflows/build.yml"
+
+env:
+  GKI_MANIFEST_BRANCH: common-android15-6.6
+  ARCH: arm64
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
+          df -h
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git curl wget bc bison flex libssl-dev make gcc \
+            libelf-dev build-essential python3 python3-pip \
+            zip unzip rsync cpio ccache lz4 zstd
+          # repo tool
+          mkdir -p "$HOME/bin"
+          curl -sSL https://storage.googleapis.com/git-repo-downloads/repo > "$HOME/bin/repo"
+          chmod a+x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          git config --global user.name "ci"
+          git config --global user.email "ci@local"
+
+      - name: Sync GKI source
+        run: |
+          mkdir -p kernel_workspace && cd kernel_workspace
+          repo init --depth=1 -u https://android.googlesource.com/kernel/manifest -b "${GKI_MANIFEST_BRANCH}"
+          repo sync -c -j"$(nproc)" --no-tags --no-clone-bundle --fail-fast
+          # remove ABI checks / protected exports that block custom symbols
+          rm -f common/android/abi_gki_protected_exports_* || true
+          sed -i 's/ -dirty//g' common/scripts/setlocalversion || true
+
+      - name: Integrate KernelSU-Next
+        run: |
+          cd kernel_workspace
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${{ github.event.inputs.ksu_branch || 'next' }}/kernel/setup.sh" | bash -s "${{ github.event.inputs.ksu_branch || 'next' }}"
+          cd KernelSU-Next
+          echo "KSU_VERSION=$(( $(git rev-list --count HEAD) + 10200 ))" >> "$GITHUB_ENV"
+
+      - name: Apply SuSFS patches
+        run: |
+          cd kernel_workspace
+          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b "${{ github.event.inputs.susfs_branch || 'gki-android15-6.6' }}"
+          # kernel-side susfs files
+          cp -v susfs4ksu/kernel_patches/fs/* common/fs/
+          cp -v susfs4ksu/kernel_patches/include/linux/* common/include/linux/
+          # main GKI susfs patch
+          ( cd common && patch -p1 < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch ) || \
+            ( cd common && patch -p1 --fuzz=3 < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch )
+          # KernelSU-Next susfs integration patch (provided by susfs repo)
+          KSU_PATCH=$(ls susfs4ksu/kernel_patches/KernelSU*/10_enable_susfs_for_ksu.patch 2>/dev/null | head -1 || true)
+          if [ -n "$KSU_PATCH" ]; then
+            ( cd KernelSU-Next && patch -p1 < "../$KSU_PATCH" ) || \
+            ( cd KernelSU-Next && patch -p1 --fuzz=3 < "../$KSU_PATCH" ) || true
+          fi
+
+      - name: Kernel config fragments
+        run: |
+          cd kernel_workspace/common
+          cat >> arch/arm64/configs/gki_defconfig <<'EOF'
+          # --- KernelSU-Next ---
+          CONFIG_KSU=y
+          CONFIG_KSU_KPROBES_HOOK=y
+          # --- SuSFS ---
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_KSTAT=y
+          CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
+          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+          CONFIG_KSU_SUSFS_ENABLE_LOG=y
+          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+          # --- extras ---
+          CONFIG_TMPFS_XATTR=y
+          CONFIG_TMPFS_POSIX_ACL=y
+          CONFIG_NET_SCH_CAKE=y
+          CONFIG_IP_NF_TARGET_TTL=y
+          CONFIG_IP6_NF_TARGET_HL=y
+          CONFIG_CRYPTO_ZSTD=y
+          CONFIG_ZRAM_DEF_COMP_ZSTD=y
+          EOF
+          # ensure local version stays compatible with vendor modules KMI
+          # (do NOT change CONFIG_LOCALVERSION — keep -4k so vendor .ko load)
+
+      - name: Build (Bazel / Kleaf)
+        run: |
+          cd kernel_workspace
+          export BUILD_CONFIG=common/build.config.gki.aarch64
+          # Kleaf build (android15-6.6 uses bazel)
+          tools/bazel run --config=fast --lto=none //common:kernel_aarch64_dist -- --dist_dir="$GITHUB_WORKSPACE/out_dist" || \
+          tools/bazel build --config=fast --lto=none //common:kernel_aarch64_dist
+          # fallback: locate Image regardless
+          mkdir -p "$GITHUB_WORKSPACE/out_dist"
+          find . -name "Image" -path "*dist*" -exec cp -v {} "$GITHUB_WORKSPACE/out_dist/" \; || true
+          find bazel-bin -name "Image" -exec cp -v {} "$GITHUB_WORKSPACE/out_dist/" \; 2>/dev/null || true
+          ls -la "$GITHUB_WORKSPACE/out_dist/" || true
+
+      - name: Compress kernel image
+        run: |
+          cd "$GITHUB_WORKSPACE/out_dist"
+          test -f Image || { echo "::error::Image not found"; exit 1; }
+          lz4 -9 -f Image Image.lz4
+          ls -la
+
+      - name: Get magiskboot
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          MAGISK_VER=$(curl -sSL https://api.github.com/repos/topjohnwu/Magisk/releases/latest | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)
+          curl -sSL -o magisk.zip "https://github.com/topjohnwu/Magisk/releases/download/${MAGISK_VER}/Magisk-${MAGISK_VER}.apk"
+          unzip -o magisk.zip "lib/x86_64/libmagiskboot.so" -d magisk_extract
+          cp magisk_extract/lib/x86_64/libmagiskboot.so magiskboot
+          chmod +x magiskboot
+          ./magiskboot 2>&1 | head -2 || true
+
+      - name: Repack boot.img
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          test -f stock_boot.img || { echo "::error::stock_boot.img missing in repo"; exit 1; }
+          mkdir -p repack && cd repack
+          cp ../stock_boot.img boot.img
+          ../magiskboot unpack boot.img
+          # replace kernel
+          cp ../out_dist/Image kernel
+          ../magiskboot repack boot.img boot_new.img
+          mv boot_new.img ../boot_new.img
+          cd ..
+          ls -la boot_new.img
+
+      - name: Package AnyKernel3 (optional, for recovery flashing)
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
+          rm -rf ak3/.git
+          cp out_dist/Image ak3/Image || cp out_dist/Image.lz4 ak3/Image.lz4
+          # minimal ak3 config for rodin (boot partition, no dtb replace)
+          cat > ak3/anykernel.sh <<'AK3'
+          properties() { '
+          kernel.string=rodin-kernel-susfs
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=1
+          device.name1=rodin
+          device.name2=POCO X7 Pro
+          supported.versions=
+          supported.patchlevels=
+          '; }
+          block=/dev/block/bootdevice/by-name/boot;
+          is_slot_device=1;
+          ramdisk_compression=auto;
+          patch_vbmeta_flag=auto;
+          . tools/ak3-core.sh;
+          split_boot;
+          flash_generic kernel;
+          flash_generic dtb;
+          write_boot;
+          AK3
+          cd ak3 && zip -r9 "../AnyKernel3-rodin.zip" . -x .git -x "*.zip" && cd ..
+          ls -la AnyKernel3-rodin.zip
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rodin-kernel-${{ github.run_number }}
+          path: |
+            out_dist/Image
+            out_dist/Image.lz4
+            boot_new.img
+            AnyKernel3-rodin.zip
+          if-no-files-found: warn
+          retention-days: 14
