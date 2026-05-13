@@ -1,0 +1,137 @@
+name: Build vendor kernel (rodin)
+
+# Builds a kernel from Xiaomi's bsp-rodin-v-oss source (which has all MTK patches)
+# + KernelSU-Next + SuSFS. This produces a rodin-specific kernel with working WiFi.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ksu_branch:
+        description: "pershoot KSU-Next branch (has susfs integrated)"
+        default: "next-susfs"
+
+env:
+  GKI_MANIFEST_BRANCH: common-android15-6.6
+  XIAOMI_BRANCH: bsp-rodin-v-oss
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
+          df -h
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git curl wget bc bison flex libssl-dev make gcc \
+            libelf-dev build-essential python3 python3-pip \
+            zip unzip rsync cpio ccache lz4 zstd perl
+          mkdir -p "$HOME/bin"
+          curl -sSL https://storage.googleapis.com/git-repo-downloads/repo > "$HOME/bin/repo"
+          chmod a+x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          git config --global user.name "ci"
+          git config --global user.email "ci@local"
+
+      - name: Sync GKI build infrastructure
+        run: |
+          mkdir -p ws && cd ws
+          repo init --depth=1 -u https://android.googlesource.com/kernel/manifest -b "${GKI_MANIFEST_BRANCH}"
+          # sync everything EXCEPT common/ (we'll replace it with Xiaomi source)
+          repo sync -c -j"$(nproc)" --no-tags --no-clone-bundle --fail-fast
+
+      - name: Replace common/ with Xiaomi rodin source
+        run: |
+          cd ws
+          rm -rf common
+          git clone --depth=1 -b "${XIAOMI_BRANCH}" https://github.com/MiCode/Xiaomi_Kernel_OpenSource common
+          echo "=== Xiaomi kernel version ==="
+          head -6 common/Makefile
+
+      - name: Clean dirty flags
+        run: |
+          cd ws
+          sed -i 's/-dirty//g; s/ -dirty//g' common/scripts/setlocalversion || true
+          sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" build/kernel/kleaf/impl/stamp.bzl 2>/dev/null || true
+          sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" build/kleaf/impl/stamp.bzl 2>/dev/null || true
+
+      - name: Remove protected exports
+        run: |
+          cd ws
+          rm -rf common/android/abi_gki_protected_exports_* || true
+          perl -pi -e 's/^\s*"protected_exports_list"\s*:\s*"android\/abi_gki_protected_exports_aarch64",\s*$//;' common/BUILD.bazel
+          perl -pi -e 's/^\s*"protected_exports_list"\s*:\s*"android\/abi_gki_protected_exports_x86_64",\s*$//;'   common/BUILD.bazel
+          ! grep -q '"protected_exports_list".*"android/abi_gki_protected_exports' common/BUILD.bazel
+
+      - name: Integrate KernelSU-Next (pershoot next-susfs - susfs pre-integrated)
+        run: |
+          cd ws
+          curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/${{ github.event.inputs.ksu_branch || 'next-susfs' }}/kernel/setup.sh" | bash -s "${{ github.event.inputs.ksu_branch || 'next-susfs' }}"
+          ls -la KernelSU-Next || true
+
+      - name: Apply SuSFS kernel-side patch
+        run: |
+          cd ws
+          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android15-6.6
+          cp -v susfs4ksu/kernel_patches/fs/* common/fs/
+          cp -v susfs4ksu/kernel_patches/include/linux/* common/include/linux/
+          # apply main GKI susfs patch — may need fuzz because Xiaomi added MTK lines
+          ( cd common && patch -p1 --no-backup-if-mismatch < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch ) || \
+          ( cd common && patch -p1 --fuzz=5 --no-backup-if-mismatch < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch ) || \
+          echo "::warning::susfs kernel patch had conflicts; check rej files"
+          # list any rejected patches
+          find common -name '*.rej' 2>/dev/null | head
+
+      - name: Place config fragment
+        run: |
+          cd ws
+          cp "$GITHUB_WORKSPACE/rodin.fragment" common/arch/arm64/configs/rodin.fragment
+          cat common/arch/arm64/configs/rodin.fragment
+
+      - name: Build (Kleaf)
+        run: |
+          cd ws
+          tools/bazel build --config=fast \
+            --defconfig_fragment=//common:arch/arm64/configs/rodin.fragment \
+            //common:kernel_aarch64 2>&1 | tail -50
+          mkdir -p "$GITHUB_WORKSPACE/out_dist"
+          IMG=$(find -L bazel-bin -name Image -path '*kernel_aarch64*' | head -1)
+          [ -z "$IMG" ] && IMG=$(find -L bazel-bin -name Image | head -1)
+          echo "Found Image: $IMG"
+          test -n "$IMG"
+          cp -v "$IMG" "$GITHUB_WORKSPACE/out_dist/Image"
+          ls -la "$GITHUB_WORKSPACE/out_dist/"
+
+      - name: Get magiskboot + repack
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          MAGISK_VER=$(curl -sSL https://api.github.com/repos/topjohnwu/Magisk/releases/latest | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)
+          curl -sSL -o magisk.apk "https://github.com/topjohnwu/Magisk/releases/download/${MAGISK_VER}/Magisk-${MAGISK_VER}.apk"
+          unzip -o magisk.apk "lib/x86_64/libmagiskboot.so" -d magisk_extract
+          cp magisk_extract/lib/x86_64/libmagiskboot.so magiskboot
+          chmod +x magiskboot
+          mkdir repack && cd repack
+          cp ../stock_boot.img boot.img
+          ../magiskboot unpack boot.img
+          cp ../out_dist/Image kernel
+          ../magiskboot repack boot.img boot_new.img
+          mv boot_new.img ../boot_new_vendor.img
+          cd ..
+          ls -la boot_new_vendor.img
+          strings boot_new_vendor.img | grep -m1 "Linux version" || true
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: vendor-${{ github.run_number }}
+          path: |
+            out_dist/Image
+            boot_new_vendor.img
+          retention-days: 14
