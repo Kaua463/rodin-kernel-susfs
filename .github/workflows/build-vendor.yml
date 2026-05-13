@@ -119,6 +119,18 @@ jobs:
             for r in $REMAINING; do echo "--- $r ---"; cat "$r"; done
             exit 1
           fi
+          # ENSURE susfs_def.h is unconditionally included in namespace.c (DEFAULT_KSU_MNT_ID etc.)
+          # The fallback patch put the include inside an #ifdef block, but some
+          # patch hunks added code using the macros OUTSIDE that block.
+          if ! grep -q '^#include <linux/susfs_def.h>' fs/namespace.c; then
+            sed -i '0,/^#include "internal.h"/{s|^#include "internal.h"|#include "internal.h"\n#include <linux/susfs_def.h>|}' fs/namespace.c
+            echo "added unconditional susfs_def.h include"
+          else
+            sed -i '/^#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT$/,/^#endif/{/^#include <linux\/susfs_def.h>$/d}' fs/namespace.c
+            grep -q '^#include <linux/susfs_def.h>' fs/namespace.c ||               sed -i '0,/^#include "internal.h"/{s|^#include "internal.h"|#include "internal.h"\n#include <linux/susfs_def.h>|}' fs/namespace.c
+            echo "moved susfs_def.h include outside ifdef"
+          fi
+          grep -n "susfs_def.h" fs/namespace.c | head -3
           # sanity: confirm key symbols present
           grep -n "susfs_is_current_ksu_domain\|susfs_is_sdcard_android_data_not_decrypted" fs/namespace.c | head -5
           grep -n "bypass_orig_flow" fs/namespace.c | head -5
