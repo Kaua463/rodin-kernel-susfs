@@ -12,10 +12,10 @@ on:
   push:
     paths:
       - ".github/workflows/build.yml"
+      - "rodin.fragment"
 
 env:
   GKI_MANIFEST_BRANCH: common-android15-6.6
-  ARCH: arm64
 
 jobs:
   build:
@@ -36,8 +36,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             git curl wget bc bison flex libssl-dev make gcc \
             libelf-dev build-essential python3 python3-pip \
-            zip unzip rsync cpio ccache lz4 zstd
-          # repo tool
+            zip unzip rsync cpio ccache lz4 zstd perl
           mkdir -p "$HOME/bin"
           curl -sSL https://storage.googleapis.com/git-repo-downloads/repo > "$HOME/bin/repo"
           chmod a+x "$HOME/bin/repo"
@@ -50,89 +49,66 @@ jobs:
           mkdir -p kernel_workspace && cd kernel_workspace
           repo init --depth=1 -u https://android.googlesource.com/kernel/manifest -b "${GKI_MANIFEST_BRANCH}"
           repo sync -c -j"$(nproc)" --no-tags --no-clone-bundle --fail-fast
-          # remove ABI checks / protected exports that block custom symbols
-          rm -f common/android/abi_gki_protected_exports_* || true
+
+      - name: Clean dirty flags
+        run: |
+          cd kernel_workspace
+          sed -i 's/-dirty//g' common/scripts/setlocalversion || true
           sed -i 's/ -dirty//g' common/scripts/setlocalversion || true
-          # disable defconfig canonical-form check (we add KSU/SuSFS configs)
-          sed -i 's/check_defconfig//g' common/build.config.gki* 2>/dev/null || true
-          grep -rl "check_defconfig" common/build* 2>/dev/null | xargs -r sed -i 's/check_defconfig//g' || true
+          sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" build/kernel/kleaf/impl/stamp.bzl 2>/dev/null || true
+          sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" build/kleaf/impl/stamp.bzl 2>/dev/null || true
+
+      - name: Remove GKI protected exports
+        run: |
+          cd kernel_workspace
+          rm -rf common/android/abi_gki_protected_exports_* || true
+          # remove the BUILD.bazel reference so bazel doesn't require the deleted file
+          perl -pi -e 's/^\s*"protected_exports_list"\s*:\s*"android\/abi_gki_protected_exports_aarch64",\s*$//;' common/BUILD.bazel
+          perl -pi -e 's/^\s*"protected_exports_list"\s*:\s*"android\/abi_gki_protected_exports_x86_64",\s*$//;'   common/BUILD.bazel
+          ! grep -q '"protected_exports_list"[[:space:]]*:[[:space:]]*"android/abi_gki_protected_exports' common/BUILD.bazel
 
       - name: Integrate KernelSU-Next
         run: |
           cd kernel_workspace
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${{ github.event.inputs.ksu_branch || 'next' }}/kernel/setup.sh" | bash -s "${{ github.event.inputs.ksu_branch || 'next' }}"
-          cd KernelSU-Next
-          echo "KSU_VERSION=$(( $(git rev-list --count HEAD) + 10200 ))" >> "$GITHUB_ENV"
+          ls -la KernelSU-Next || true
 
-      - name: Apply SuSFS patches
+      - name: Apply SuSFS (kernel side)
         run: |
           cd kernel_workspace
           git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b "${{ github.event.inputs.susfs_branch || 'gki-android15-6.6' }}"
-          # kernel-side susfs files
           cp -v susfs4ksu/kernel_patches/fs/* common/fs/
           cp -v susfs4ksu/kernel_patches/include/linux/* common/include/linux/
-          # main GKI susfs patch
-          ( cd common && patch -p1 < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch ) || \
-            ( cd common && patch -p1 --fuzz=3 < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch )
-          # KernelSU-Next susfs integration patch (provided by susfs repo)
-          KSU_PATCH=$(ls susfs4ksu/kernel_patches/KernelSU*/10_enable_susfs_for_ksu.patch 2>/dev/null | head -1 || true)
-          if [ -n "$KSU_PATCH" ]; then
-            ( cd KernelSU-Next && patch -p1 < "../$KSU_PATCH" ) || \
-            ( cd KernelSU-Next && patch -p1 --fuzz=3 < "../$KSU_PATCH" ) || true
-          fi
+          cd common
+          patch -p1 < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch || \
+          patch -p1 --fuzz=3 < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch
 
-      - name: Kernel config fragments
+      - name: Place config fragment
         run: |
-          cd kernel_workspace/common
-          cat >> arch/arm64/configs/gki_defconfig <<'EOF'
-          # --- KernelSU-Next ---
-          CONFIG_KSU=y
-          CONFIG_KSU_KPROBES_HOOK=y
-          # --- SuSFS ---
-          CONFIG_KSU_SUSFS=y
-          CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
-          CONFIG_KSU_SUSFS_SUS_PATH=y
-          CONFIG_KSU_SUSFS_SUS_MOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
-          CONFIG_KSU_SUSFS_SUS_KSTAT=y
-          CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
-          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
-          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-          CONFIG_KSU_SUSFS_ENABLE_LOG=y
-          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
-          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
-          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-          # --- extras ---
-          CONFIG_TMPFS_XATTR=y
-          CONFIG_TMPFS_POSIX_ACL=y
-          CONFIG_NET_SCH_CAKE=y
-          CONFIG_IP_NF_TARGET_TTL=y
-          CONFIG_IP6_NF_TARGET_HL=y
-          CONFIG_CRYPTO_ZSTD=y
-          CONFIG_ZRAM_DEF_COMP_ZSTD=y
-          EOF
-          # ensure local version stays compatible with vendor modules KMI
-          # (do NOT change CONFIG_LOCALVERSION — keep -4k so vendor .ko load)
+          cd kernel_workspace
+          cp "$GITHUB_WORKSPACE/rodin.fragment" common/arch/arm64/configs/rodin.fragment
+          echo "=== fragment ==="; cat common/arch/arm64/configs/rodin.fragment
 
       - name: Build (Kleaf)
         run: |
           cd kernel_workspace
+          tools/bazel build --config=fast \
+            --defconfig_fragment=//common:arch/arm64/configs/rodin.fragment \
+            //common:kernel_aarch64
           mkdir -p "$GITHUB_WORKSPACE/out_dist"
-          # android15-6.6 GKI uses Kleaf (bazel). --config=fast skips some checks; --lto=none matches stock.
-          tools/bazel run --config=fast --lto=none //common:kernel_aarch64_dist -- --dist_dir="$GITHUB_WORKSPACE/out_dist" --destdir="$GITHUB_WORKSPACE/out_dist"
+          IMG=$(find -L bazel-bin -name Image -path '*kernel_aarch64*' | head -1)
+          [ -z "$IMG" ] && IMG=$(find -L bazel-bin -name Image | head -1)
+          echo "Found Image: $IMG"
+          test -n "$IMG"
+          cp -v "$IMG" "$GITHUB_WORKSPACE/out_dist/Image"
+          # also grab boot.img if kleaf produced one
+          for b in $(find -L bazel-bin -name 'boot*.img' 2>/dev/null); do cp -v "$b" "$GITHUB_WORKSPACE/out_dist/"; done || true
           ls -la "$GITHUB_WORKSPACE/out_dist/"
-          test -f "$GITHUB_WORKSPACE/out_dist/Image" || {
-            echo "Image not in dist dir, searching bazel-bin..."
-            find -L bazel-bin -name Image -exec cp -v {} "$GITHUB_WORKSPACE/out_dist/" \; || true
-          }
-          test -f "$GITHUB_WORKSPACE/out_dist/Image"
 
       - name: Compress kernel image
         run: |
           cd "$GITHUB_WORKSPACE/out_dist"
-          test -f Image || { echo "::error::Image not found"; exit 1; }
+          test -f Image
           lz4 -9 -f Image Image.lz4
           ls -la
 
@@ -140,33 +116,32 @@ jobs:
         run: |
           cd "$GITHUB_WORKSPACE"
           MAGISK_VER=$(curl -sSL https://api.github.com/repos/topjohnwu/Magisk/releases/latest | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)
-          curl -sSL -o magisk.zip "https://github.com/topjohnwu/Magisk/releases/download/${MAGISK_VER}/Magisk-${MAGISK_VER}.apk"
-          unzip -o magisk.zip "lib/x86_64/libmagiskboot.so" -d magisk_extract
+          echo "Magisk $MAGISK_VER"
+          curl -sSL -o magisk.apk "https://github.com/topjohnwu/Magisk/releases/download/${MAGISK_VER}/Magisk-${MAGISK_VER}.apk"
+          unzip -o magisk.apk "lib/x86_64/libmagiskboot.so" -d magisk_extract
           cp magisk_extract/lib/x86_64/libmagiskboot.so magiskboot
           chmod +x magiskboot
-          ./magiskboot 2>&1 | head -2 || true
 
       - name: Repack boot.img
         run: |
           cd "$GITHUB_WORKSPACE"
-          test -f stock_boot.img || { echo "::error::stock_boot.img missing in repo"; exit 1; }
+          test -f stock_boot.img
           mkdir -p repack && cd repack
           cp ../stock_boot.img boot.img
           ../magiskboot unpack boot.img
-          # replace kernel
           cp ../out_dist/Image kernel
           ../magiskboot repack boot.img boot_new.img
           mv boot_new.img ../boot_new.img
           cd ..
           ls -la boot_new.img
+          ../magiskboot 2>/dev/null || true
 
-      - name: Package AnyKernel3 (optional, for recovery flashing)
+      - name: Package AnyKernel3
         run: |
           cd "$GITHUB_WORKSPACE"
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
           rm -rf ak3/.git
-          cp out_dist/Image ak3/Image || cp out_dist/Image.lz4 ak3/Image.lz4
-          # minimal ak3 config for rodin (boot partition, no dtb replace)
+          cp out_dist/Image ak3/Image
           cat > ak3/anykernel.sh <<'AK3'
           properties() { '
           kernel.string=rodin-kernel-susfs
@@ -187,10 +162,9 @@ jobs:
           . tools/ak3-core.sh;
           split_boot;
           flash_generic kernel;
-          flash_generic dtb;
           write_boot;
           AK3
-          cd ak3 && zip -r9 "../AnyKernel3-rodin.zip" . -x .git -x "*.zip" && cd ..
+          cd ak3 && zip -r9 "../AnyKernel3-rodin.zip" . -x .git && cd ..
           ls -la AnyKernel3-rodin.zip
 
       - name: Upload artifacts
