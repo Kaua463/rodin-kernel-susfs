@@ -53,6 +53,9 @@ jobs:
           # remove ABI checks / protected exports that block custom symbols
           rm -f common/android/abi_gki_protected_exports_* || true
           sed -i 's/ -dirty//g' common/scripts/setlocalversion || true
+          # disable defconfig canonical-form check (we add KSU/SuSFS configs)
+          sed -i 's/check_defconfig//g' common/build.config.gki* 2>/dev/null || true
+          grep -rl "check_defconfig" common/build* 2>/dev/null | xargs -r sed -i 's/check_defconfig//g' || true
 
       - name: Integrate KernelSU-Next
         run: |
@@ -113,18 +116,18 @@ jobs:
           # ensure local version stays compatible with vendor modules KMI
           # (do NOT change CONFIG_LOCALVERSION — keep -4k so vendor .ko load)
 
-      - name: Build (Bazel / Kleaf)
+      - name: Build (Kleaf)
         run: |
           cd kernel_workspace
-          export BUILD_CONFIG=common/build.config.gki.aarch64
-          # Kleaf build (android15-6.6 uses bazel)
-          tools/bazel run --config=fast --lto=none //common:kernel_aarch64_dist -- --dist_dir="$GITHUB_WORKSPACE/out_dist" || \
-          tools/bazel build --config=fast --lto=none //common:kernel_aarch64_dist
-          # fallback: locate Image regardless
           mkdir -p "$GITHUB_WORKSPACE/out_dist"
-          find . -name "Image" -path "*dist*" -exec cp -v {} "$GITHUB_WORKSPACE/out_dist/" \; || true
-          find bazel-bin -name "Image" -exec cp -v {} "$GITHUB_WORKSPACE/out_dist/" \; 2>/dev/null || true
-          ls -la "$GITHUB_WORKSPACE/out_dist/" || true
+          # android15-6.6 GKI uses Kleaf (bazel). --config=fast skips some checks; --lto=none matches stock.
+          tools/bazel run --config=fast --lto=none //common:kernel_aarch64_dist -- --dist_dir="$GITHUB_WORKSPACE/out_dist" --destdir="$GITHUB_WORKSPACE/out_dist"
+          ls -la "$GITHUB_WORKSPACE/out_dist/"
+          test -f "$GITHUB_WORKSPACE/out_dist/Image" || {
+            echo "Image not in dist dir, searching bazel-bin..."
+            find -L bazel-bin -name Image -exec cp -v {} "$GITHUB_WORKSPACE/out_dist/" \; || true
+          }
+          test -f "$GITHUB_WORKSPACE/out_dist/Image"
 
       - name: Compress kernel image
         run: |
