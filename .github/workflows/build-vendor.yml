@@ -1,6 +1,6 @@
-name: Build vendor kernel (rodin)
+name: Build OPPO-base kernel (rodin)
 
-# Builds a kernel from Xiaomi's bsp-rodin-v-oss source (which has all MTK patches)
+# Builds a kernel from OPPO MT6899 source (6.6.89, matches rodin stock vendor modules) (which has all MTK patches)
 # + KernelSU-Next + SuSFS. This produces a rodin-specific kernel with working WiFi.
 
 on:
@@ -12,7 +12,9 @@ on:
 
 env:
   GKI_MANIFEST_BRANCH: common-android15-6.6
-  XIAOMI_BRANCH: bsp-rodin-v-oss
+  # OPPO source 6.6.89 — EXACT sublevel match with rodin stock vendor modules
+  KERNEL_REPO: https://github.com/oppo-source/android_kernel_oppo_mt6899
+  KERNEL_BRANCH: oppo/mt6899_b_16.0.0_reno14_pro
 
 jobs:
   build:
@@ -47,12 +49,12 @@ jobs:
           # sync everything EXCEPT common/ (we'll replace it with Xiaomi source)
           repo sync -c -j"$(nproc)" --no-tags --no-clone-bundle --fail-fast
 
-      - name: Replace common/ with Xiaomi rodin source
+      - name: Replace common/ with OPPO MT6899 source (Android 16 / 6.6.89)
         run: |
           cd ws
           rm -rf common
-          git clone --depth=1 -b "${XIAOMI_BRANCH}" https://github.com/MiCode/Xiaomi_Kernel_OpenSource common
-          echo "=== Xiaomi kernel version ==="
+          git clone --depth=1 -b "${KERNEL_BRANCH}" "${KERNEL_REPO}" common
+          echo "=== OPPO kernel version (should be 6.6.89) ==="
           head -6 common/Makefile
 
       - name: Clean dirty flags
