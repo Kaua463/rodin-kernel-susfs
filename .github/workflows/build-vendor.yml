@@ -56,19 +56,15 @@ jobs:
           git clone --depth=1 -b "${KERNEL_BRANCH}" "${KERNEL_REPO}" common
           echo "=== OPPO kernel version (should be 6.6.89) ==="
           head -6 common/Makefile
-          # OPPO references rust/1.73.0c which is not in the GKI manifest.
-          # Replace with the standard rust prebuilt that the manifest provides, or remove.
-          echo "=== rust refs in BUILD.bazel ==="
-          grep -n "rust/linux-x86" common/BUILD.bazel | head
-          # Standard android15-6.6 manifest has prebuilts/rust/linux-x86/<version>
-          # Find what is available
-          ls prebuilts/rust/linux-x86/ 2>/dev/null
-          # Substitute 1.73.0c with whatever the manifest provides
-          AVAIL=$(ls prebuilts/rust/linux-x86/ 2>/dev/null | head -1)
-          if [ -n "$AVAIL" ] && [ "$AVAIL" != "1.73.0c" ]; then
-            echo "replacing 1.73.0c with $AVAIL"
-            sed -i "s|prebuilts/rust/linux-x86/1.73.0c|prebuilts/rust/linux-x86/$AVAIL|g" common/BUILD.bazel
+          # OPPO references rust/1.73.0c (their custom version).
+          # GKI manifest provides 1.73.0b — symlink 1.73.0c -> 1.73.0b so Bazel resolves it.
+          AVAIL=$(ls prebuilts/rust/linux-x86/ 2>/dev/null)
+          echo "available rust prebuilts: $AVAIL"
+          if [ -d prebuilts/rust/linux-x86/1.73.0b ] && [ ! -e prebuilts/rust/linux-x86/1.73.0c ]; then
+            ln -sv 1.73.0b prebuilts/rust/linux-x86/1.73.0c
+            echo "created symlink 1.73.0c -> 1.73.0b"
           fi
+          ls -la prebuilts/rust/linux-x86/
 
       - name: Clean dirty flags
         run: |
