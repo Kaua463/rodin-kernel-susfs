@@ -1,0 +1,69 @@
+name: Repack prebuilt GKI kernel
+
+# Downloads a prebuilt WildKernels GKI (KSU-Next + SuSFS) AnyKernel3 zip,
+# extracts the kernel Image, and repacks it into the rodin stock boot.img.
+# Output: boot_new.img (flash via: fastboot flash boot boot_new.img)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ak3_url:
+        description: "URL of the prebuilt AnyKernel3 zip"
+        required: true
+        default: "https://github.com/WildKernels/GKI_KernelSU_SUSFS/releases/download/v1.5.11-r4/WKSU-13971-android15-6.6.89-2025-06-AnyKernel3.zip"
+
+jobs:
+  repack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download prebuilt AnyKernel3
+        run: |
+          curl -fL -o ak3.zip "${{ github.event.inputs.ak3_url }}"
+          mkdir ak3 && cd ak3 && unzip -o ../ak3.zip
+          echo "=== AnyKernel3 contents ==="; ls -la
+          # the kernel image is one of: Image / Image.gz / Image.lz4
+          for f in Image Image.gz Image.lz4 Image.gz-dtb zImage; do
+            [ -f "$f" ] && echo "FOUND_IMG=$f" >> "$GITHUB_ENV" && break
+          done
+
+      - name: Get magiskboot
+        run: |
+          MAGISK_VER=$(curl -sSL https://api.github.com/repos/topjohnwu/Magisk/releases/latest | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)
+          curl -sSL -o magisk.apk "https://github.com/topjohnwu/Magisk/releases/download/${MAGISK_VER}/Magisk-${MAGISK_VER}.apk"
+          unzip -o magisk.apk "lib/x86_64/libmagiskboot.so" -d magisk_extract
+          cp magisk_extract/lib/x86_64/libmagiskboot.so magiskboot
+          chmod +x magiskboot
+
+      - name: Repack boot.img
+        run: |
+          test -f stock_boot.img
+          mkdir repack && cd repack
+          cp ../stock_boot.img boot.img
+          ../magiskboot unpack boot.img
+          echo "=== unpacked ==="; ls -la
+          # determine compression of the original kernel and of the new one
+          NEWIMG="../ak3/${FOUND_IMG:-Image}"
+          test -f "$NEWIMG" || NEWIMG=$(find ../ak3 -maxdepth 1 -name 'Image*' | head -1)
+          echo "Using new kernel: $NEWIMG"
+          # if the AnyKernel image is compressed (.gz/.lz4) decompress it; magiskboot wants raw or matching format
+          case "$NEWIMG" in
+            *.gz)  gunzip -c "$NEWIMG" > kernel ;;
+            *.lz4) lz4 -d -f "$NEWIMG" kernel ;;
+            *)     cp "$NEWIMG" kernel ;;
+          esac
+          ../magiskboot repack boot.img boot_new.img
+          mv boot_new.img ../boot_new.img
+          cd ..
+          ls -la boot_new.img
+          ./magiskboot unpack boot_new.img 2>&1 | head -10 || true
+          strings boot_new.img | grep -m1 "Linux version" || true
+
+      - name: Upload boot_new.img
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot_new-${{ github.run_number }}
+          path: |
+            boot_new.img
+          retention-days: 14
