@@ -44,9 +44,11 @@ jobs:
       - name: Checkout common/ at EXACT stock commit
         run: |
           cd ws/common
+          echo "=== remotes ==="
           git remote -v
-          git fetch origin "${STOCK_COMMIT}" --depth=1
-          git checkout "${STOCK_COMMIT}"
+          # repo sync uses arbitrary remote names; fetch directly from googlesource
+          git fetch https://android.googlesource.com/kernel/common.git "${STOCK_COMMIT}" --depth=1
+          git checkout FETCH_HEAD
           echo "=== now at stock commit ==="
           git log -1 --oneline
           head -6 Makefile
