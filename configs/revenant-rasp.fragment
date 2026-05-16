@@ -1,0 +1,11 @@
+# Revenant Beta-v1.2 — RASP defense (banking apps bypass)
+
+# SUS_MAP — esconde /proc/<pid>/maps de entries sus
+CONFIG_KSU_SUSFS_SUS_MAP=y
+
+# Custom defense patches applied at build time:
+# - __system_property_get kernel-level hook (spoofa ro.boot.* props na origem)
+# - /dev/block/by-name/vbmeta_a read intercept (retorna AVB header locked)
+# - per-app mount namespace (banks ⊥ veem mounts custom)
+#
+# These are not Kconfig options — applied as source patches in build script.

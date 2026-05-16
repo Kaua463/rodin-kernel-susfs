@@ -1,0 +1,42 @@
+From: Revenant <noreply@revenant.local>
+Subject: [PATCH] core: spoof ro.boot.* properties at kernel boot
+
+When the kernel parses bootconfig, replace androidboot.verifiedbootstate=orange
+with green, androidboot.flash.locked=0 with 1, and
+androidboot.vbmeta.device_state=unlocked with locked.
+
+This way userspace `__system_property_get` calls return the spoofed values
+without needing resetprop runtime patching.
+
+---
+ init/bootconfig.c | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/init/bootconfig.c b/init/bootconfig.c
+--- a/init/bootconfig.c
++++ b/init/bootconfig.c
+@@ -200,6 +200,24 @@ static char * __init xbc_make_cmdline(const char *key)
+ 			memcpy(p, " ", 1);
+ 			p++;
+ 		}
++
++		/* Revenant: spoof boot-state markers at the source */
++		if (q && !memcmp(q, "androidboot.verifiedbootstate", 29)) {
++			char *eq = strchr(q, '=');
++			if (eq && (eq - q) + 6 < q_len) {
++				memcpy(eq + 1, "green", 5);
++			}
++		}
++		if (q && !memcmp(q, "androidboot.flash.locked", 24)) {
++			char *eq = strchr(q, '=');
++			if (eq) *(eq + 1) = '1';
++		}
++		if (q && !memcmp(q, "androidboot.vbmeta.device_state", 31)) {
++			char *eq = strchr(q, '=');
++			if (eq && (eq - q) + 7 < q_len) {
++				memcpy(eq + 1, "locked", 6);
++			}
++		}
+ 		q_size = strlen(q);
+ 		memcpy(p, q, q_size);
+ 		p += q_size;

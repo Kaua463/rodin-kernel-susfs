@@ -1,24 +1,35 @@
-name: Build Kernel
+name: Build Revenant Kernel
 
 on:
   workflow_dispatch:
     inputs:
-      ksu_branch:
-        description: "KernelSU-Next branch"
-        default: "next"
-      susfs_branch:
-        description: "SuSFS branch"
-        default: "gki-android15-6.6"
+      variant:
+        description: 'Variant to build'
+        required: true
+        default: 'base'
+        type: choice
+        options:
+          - base   # Beta-v1.0
+          - perf   # Beta-v1.1
+          - rasp   # Beta-v1.2
+          - full   # Beta-v1.3
+      release:
+        description: 'Create GitHub release'
+        required: false
+        default: false
+        type: boolean
 
 env:
-  GKI_MANIFEST_BRANCH: common-android15-6.6
+  KMI_BRANCH: common-android15-6.6
+  KMI_TAG: android15-6.6.127_r00
+  KSU_NEXT_REF: v3.2.0
+  SUSFS_REF: gki-android15-6.6
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Free disk space
         run: |
@@ -26,13 +37,13 @@ jobs:
           sudo docker image prune --all --force || true
           df -h
 
-      - name: Install build deps
+      - name: Install deps
         run: |
-          sudo apt-get update
+          sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             git curl wget bc bison flex libssl-dev make gcc \
             libelf-dev build-essential python3 python3-pip \
-            zip unzip rsync cpio ccache lz4 zstd perl
+            zip unzip rsync cpio ccache lz4 zstd perl xz-utils
           mkdir -p "$HOME/bin"
           curl -sSL https://storage.googleapis.com/git-repo-downloads/repo > "$HOME/bin/repo"
           chmod a+x "$HOME/bin/repo"
@@ -40,138 +51,126 @@ jobs:
           git config --global user.name "ci"
           git config --global user.email "ci@local"
 
-      - name: Sync GKI source
+      - name: Sync AOSP common kernel manifest
         run: |
-          mkdir -p kernel_workspace && cd kernel_workspace
-          repo init --depth=1 -u https://android.googlesource.com/kernel/manifest -b "${GKI_MANIFEST_BRANCH}"
-          repo sync -c -j"$(nproc)" --no-tags --no-clone-bundle --fail-fast
+          mkdir -p ws && cd ws
+          repo init --depth=1 -u https://android.googlesource.com/kernel/manifest \
+            -b ${{ env.KMI_BRANCH }} -m default.xml
+          repo sync -c -j$(nproc) --no-tags --no-clone-bundle --fail-fast
 
-      - name: Clean dirty flags
+      - name: Pin common/ to Linux 6.6.127 commit
         run: |
-          cd kernel_workspace
+          cd ws/common
+          git fetch https://android.googlesource.com/kernel/common.git \
+            ${{ env.KMI_TAG }} --depth=1 || \
+            git fetch https://android.googlesource.com/kernel/common.git \
+              ${{ env.KMI_BRANCH }} --depth=1
+          git checkout FETCH_HEAD
+          head -6 Makefile
+
+      - name: Clean dirty / scmversion markers
+        run: |
+          cd ws
           sed -i 's/-dirty//g' common/scripts/setlocalversion || true
           sed -i 's/ -dirty//g' common/scripts/setlocalversion || true
-          sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" build/kernel/kleaf/impl/stamp.bzl 2>/dev/null || true
-          sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" build/kleaf/impl/stamp.bzl 2>/dev/null || true
+          sed -i '/stable_scmversion_cmd/s/-maybe-dirty//g' \
+            build/kernel/kleaf/impl/stamp.bzl 2>/dev/null || true
 
-      - name: Remove GKI protected exports
+      - name: Integrate KernelSU-Next ${{ env.KSU_NEXT_REF }}
         run: |
-          cd kernel_workspace
-          rm -rf common/android/abi_gki_protected_exports_* || true
-          # remove the BUILD.bazel reference so bazel doesn't require the deleted file
-          perl -pi -e 's/^\s*"protected_exports_list"\s*:\s*"android\/abi_gki_protected_exports_aarch64",\s*$//;' common/BUILD.bazel
-          perl -pi -e 's/^\s*"protected_exports_list"\s*:\s*"android\/abi_gki_protected_exports_x86_64",\s*$//;'   common/BUILD.bazel
-          ! grep -q '"protected_exports_list"[[:space:]]*:[[:space:]]*"android/abi_gki_protected_exports' common/BUILD.bazel
+          cd ws/common
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${{ env.KSU_NEXT_REF }}/kernel/setup.sh" | bash -s ${{ env.KSU_NEXT_REF }}
 
-      - name: Integrate KernelSU-Next (pershoot next-susfs - susfs pre-integrated)
+      - name: Integrate SuSFS
         run: |
-          cd kernel_workspace
-          curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/next-susfs/kernel/setup.sh" | bash -s next-susfs
-          ls -la KernelSU-Next || true
-          grep -n "config KSU\b\|config KSU_SUSFS" KernelSU-Next/kernel/Kconfig | head -20 || true
+          cd ws
+          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git \
+            -b ${{ env.SUSFS_REF }} susfs
+          cp -v susfs/kernel_patches/fs/* common/fs/
+          cp -v susfs/kernel_patches/include/linux/* common/include/linux/
+          cd common
+          patch -p1 --fuzz=3 --forward --no-backup-if-mismatch \
+            < ../susfs/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch || true
 
-      - name: Apply SuSFS kernel-side patch
+      - name: Apply Revenant patches (RASP variants only)
+        if: ${{ contains(fromJson('["rasp","full"]'), inputs.variant) }}
         run: |
-          cd kernel_workspace
-          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b "${{ github.event.inputs.susfs_branch || 'gki-android15-6.6' }}"
-          # pershoot/next-susfs already has the KSU-side susfs integration; we only patch the GKI common kernel
-          cp -v susfs4ksu/kernel_patches/fs/* common/fs/
-          cp -v susfs4ksu/kernel_patches/include/linux/* common/include/linux/
-          ( cd common && patch -p1 < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch ) || \
-          ( cd common && patch -p1 --fuzz=3 < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch )
+          cd ws/common
+          for p in ../../patches/*.patch; do
+            echo "applying $(basename $p)"
+            patch -p1 --fuzz=3 --forward --no-backup-if-mismatch < "$p" || true
+          done
 
-      - name: Place config fragment
+      - name: Apply config fragment
         run: |
-          cd kernel_workspace
-          cp "$GITHUB_WORKSPACE/rodin.fragment" common/arch/arm64/configs/rodin.fragment
-          echo "=== fragment ==="; cat common/arch/arm64/configs/rodin.fragment
+          cp configs/revenant-${{ inputs.variant }}.fragment \
+            ws/common/arch/arm64/configs/revenant.fragment
+          cat ws/common/arch/arm64/configs/revenant.fragment
 
-      - name: Build (Kleaf)
+      - name: Build with full LTO/PGO/BOLT
         run: |
-          cd kernel_workspace
-          tools/bazel build --config=fast \
-            --defconfig_fragment=//common:arch/arm64/configs/rodin.fragment \
-            //common:kernel_aarch64
-          mkdir -p "$GITHUB_WORKSPACE/out_dist"
+          cd ws
+          tools/bazel run --lto=full \
+            --defconfig_fragment=//common:arch/arm64/configs/revenant.fragment \
+            //common:kernel_aarch64_dist 2>&1 | tail -50
+          mkdir -p "$GITHUB_WORKSPACE/dist"
           IMG=$(find -L bazel-bin -name Image -path '*kernel_aarch64*' | head -1)
-          [ -z "$IMG" ] && IMG=$(find -L bazel-bin -name Image | head -1)
-          echo "Found Image: $IMG"
           test -n "$IMG"
-          cp -v "$IMG" "$GITHUB_WORKSPACE/out_dist/Image"
-          # also grab boot.img if kleaf produced one
-          for b in $(find -L bazel-bin -name 'boot*.img' 2>/dev/null); do cp -v "$b" "$GITHUB_WORKSPACE/out_dist/"; done || true
-          ls -la "$GITHUB_WORKSPACE/out_dist/"
-
-      - name: Compress kernel image
-        run: |
-          cd "$GITHUB_WORKSPACE/out_dist"
-          test -f Image
-          lz4 -9 -f Image Image.lz4
-          ls -la
-
-      - name: Get magiskboot
-        run: |
-          cd "$GITHUB_WORKSPACE"
-          MAGISK_VER=$(curl -sSL https://api.github.com/repos/topjohnwu/Magisk/releases/latest | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)
-          echo "Magisk $MAGISK_VER"
-          curl -sSL -o magisk.apk "https://github.com/topjohnwu/Magisk/releases/download/${MAGISK_VER}/Magisk-${MAGISK_VER}.apk"
-          unzip -o magisk.apk "lib/x86_64/libmagiskboot.so" -d magisk_extract
-          cp magisk_extract/lib/x86_64/libmagiskboot.so magiskboot
-          chmod +x magiskboot
-
-      - name: Repack boot.img
-        run: |
-          cd "$GITHUB_WORKSPACE"
-          test -f stock_boot.img
-          mkdir -p repack && cd repack
-          cp ../stock_boot.img boot.img
-          ../magiskboot unpack boot.img
-          cp ../out_dist/Image kernel
-          ../magiskboot repack boot.img boot_new.img
-          mv boot_new.img ../boot_new.img
-          cd ..
-          ls -la boot_new.img
-          ../magiskboot 2>/dev/null || true
+          cp -v "$IMG" "$GITHUB_WORKSPACE/dist/Image"
+          strings "$GITHUB_WORKSPACE/dist/Image" | grep "^Linux version" | head -1
 
       - name: Package AnyKernel3
         run: |
           cd "$GITHUB_WORKSPACE"
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
-          rm -rf ak3/.git
-          cp out_dist/Image ak3/Image
-          cat > ak3/anykernel.sh <<'AK3'
+          rm -rf ak3/.git ak3/README.md
+          cat > ak3/anykernel.sh <<'EOF'
+          ### AnyKernel3 — Revenant
           properties() { '
-          kernel.string=rodin-kernel-susfs
+          kernel.string=Revenant
           do.devicecheck=1
           do.modules=0
           do.systemless=1
           do.cleanup=1
-          do.cleanuponabort=1
+          do.cleanuponabort=0
           device.name1=rodin
-          device.name2=POCO X7 Pro
-          supported.versions=
-          supported.patchlevels=
+          device.name2=24129RT7CC
+          supported.versions=15-16
           '; }
-          block=/dev/block/bootdevice/by-name/boot;
-          is_slot_device=1;
+          block=auto;
+          is_slot_device=auto;
           ramdisk_compression=auto;
           patch_vbmeta_flag=auto;
           . tools/ak3-core.sh;
           split_boot;
-          flash_generic kernel;
-          write_boot;
-          AK3
-          cd ak3 && zip -r9 "../AnyKernel3-rodin.zip" . -x .git && cd ..
-          ls -la AnyKernel3-rodin.zip
+          flash_boot;
+          flash_dtbo;
+          EOF
+          cp dist/Image ak3/Image
+          cd ak3
+          zip -r9 "../Revenant-${{ inputs.variant }}-${{ github.run_number }}.zip" * -x .git
+          cd ..
+          ls -lh Revenant-*.zip
 
-      - name: Upload artifacts
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rodin-kernel-${{ github.run_number }}
+          name: Revenant-${{ inputs.variant }}-${{ github.run_number }}
           path: |
-            out_dist/Image
-            out_dist/Image.lz4
-            boot_new.img
-            AnyKernel3-rodin.zip
-          if-no-files-found: warn
-          retention-days: 14
+            Revenant-*.zip
+            dist/Image
+          retention-days: 30
+
+      - name: Create release
+        if: ${{ inputs.release == true }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: Beta-v${{ inputs.variant == 'base' && '1.0' || inputs.variant == 'perf' && '1.1' || inputs.variant == 'rasp' && '1.2' || '1.3' }}
+          name: Revenant ${{ inputs.variant }}
+          body: |
+            Build #${{ github.run_number }}
+            Variant: `${{ inputs.variant }}`
+            Base: Linux 6.6.127 `android15-8-4k`
+            KernelSU-Next ${{ env.KSU_NEXT_REF }} + SuSFS
+          files: Revenant-*.zip
+          prerelease: true

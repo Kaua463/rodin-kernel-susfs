@@ -1,0 +1,43 @@
+From: Revenant <noreply@revenant.local>
+Subject: [PATCH] block: intercept reads on /dev/block/by-name/vbmeta_a
+
+When an unprivileged process tries to read raw bytes from the AVB vbmeta
+partition (used by RASPs to verify bootloader state independent of system
+properties), patch the AVB header bytes to indicate `locked` device state.
+
+This requires CONFIG_KSU_SUSFS to be enabled.
+
+---
+ fs/namei.c | 22 ++++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+diff --git a/fs/namei.c b/fs/namei.c
+--- a/fs/namei.c
++++ b/fs/namei.c
+@@ -3400,6 +3400,28 @@ struct file *do_filp_open(int dfd, struct filename *pathname,
+ 	struct file *filp;
+
+ 	set_nameidata(&nd, dfd, pathname, NULL);
++
++	/* Revenant: intercept vbmeta_a reads from unprivileged contexts */
++	if (current_uid().val >= 10000 && pathname && pathname->name) {
++		const char *n = pathname->name;
++		if (strstr(n, "by-name/vbmeta_a") ||
++		    strstr(n, "by-name/vbmeta_b") ||
++		    strstr(n, "by-name/vbmeta_system_a") ||
++		    strstr(n, "by-name/vbmeta_system_b")) {
++			/* point them at our spoofed vbmeta blob if present */
++			static struct filename *fake = NULL;
++			if (!fake) {
++				fake = getname_kernel("/data/adb/ksu/.vbmeta_fake");
++			}
++			if (fake && !IS_ERR(fake)) {
++				restore_nameidata();
++				set_nameidata(&nd, dfd, fake, NULL);
++			}
++		}
++	}
++
+ 	filp = path_openat(&nd, op, flags | LOOKUP_RCU);
+ 	if (unlikely(filp == ERR_PTR(-ECHILD)))
+ 		filp = path_openat(&nd, op, flags);
