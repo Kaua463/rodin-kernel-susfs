@@ -22,8 +22,9 @@ on:
 env:
   KMI_BRANCH: common-android15-6.6
   KMI_TAG: android15-6.6.127_r00
-  KSU_NEXT_REF: v3.2.0
-  SUSFS_REF: gki-android15-6.6
+  KSU_OWNER: pershoot
+  KSU_REPO: KernelSU-Next
+  KSU_REF: next-susfs
 
 jobs:
   build:
@@ -51,72 +52,87 @@ jobs:
           git config --global user.name "ci"
           git config --global user.email "ci@local"
 
-      - name: Sync AOSP common kernel manifest
+      - name: Sync AOSP manifest
         run: |
           mkdir -p ws && cd ws
           repo init --depth=1 -u https://android.googlesource.com/kernel/manifest \
             -b ${{ env.KMI_BRANCH }} -m default.xml
           repo sync -c -j$(nproc) --no-tags --no-clone-bundle --fail-fast
 
-      - name: Pin common/ to Linux 6.6.127 commit
+      - name: Pin common/ to ${{ env.KMI_TAG }}
         run: |
           cd ws/common
           git fetch https://android.googlesource.com/kernel/common.git \
-            ${{ env.KMI_TAG }} --depth=1 || \
-            git fetch https://android.googlesource.com/kernel/common.git \
-              ${{ env.KMI_BRANCH }} --depth=1
-          git checkout FETCH_HEAD
-          head -6 Makefile
+            tag ${{ env.KMI_TAG }} --depth=1
+          git checkout ${{ env.KMI_TAG }}
+          echo "=== version ==="
+          head -5 Makefile
+          echo "=== KMI_GENERATION ==="
+          grep KMI_GENERATION build.config.common
 
-      - name: Clean dirty / scmversion markers
+      - name: Clean scmversion dirty markers
         run: |
           cd ws
-          sed -i 's/-dirty//g' common/scripts/setlocalversion || true
-          sed -i 's/ -dirty//g' common/scripts/setlocalversion || true
+          sed -i 's/-dirty//g; s/ -dirty//g' common/scripts/setlocalversion
           sed -i '/stable_scmversion_cmd/s/-maybe-dirty//g' \
             build/kernel/kleaf/impl/stamp.bzl 2>/dev/null || true
 
-      - name: Integrate KernelSU-Next ${{ env.KSU_NEXT_REF }}
+      - name: Integrate KernelSU-Next (pershoot/next-susfs)
         run: |
           cd ws/common
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${{ env.KSU_NEXT_REF }}/kernel/setup.sh" | bash -s ${{ env.KSU_NEXT_REF }}
+          curl -LSs "https://raw.githubusercontent.com/${{ env.KSU_OWNER }}/${{ env.KSU_REPO }}/${{ env.KSU_REF }}/kernel/setup.sh" \
+            | bash -s ${{ env.KSU_REF }}
+          grep -q "config KSU_SUSFS" drivers/kernelsu/Kconfig
+          grep -q "config KSU_THRONE_TRACKER_ALWAYS_THREADED" drivers/kernelsu/Kconfig
+          echo "[OK] KSU+SuSFS Kconfig integrated"
 
-      - name: Integrate SuSFS
+      - name: Apply susfs4ksu fs hooks (if not pre-integrated)
         run: |
           cd ws
           git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git \
-            -b ${{ env.SUSFS_REF }} susfs
-          cp -v susfs/kernel_patches/fs/* common/fs/
-          cp -v susfs/kernel_patches/include/linux/* common/include/linux/
+            -b gki-android15-6.6 susfs
+          cp -v susfs/kernel_patches/fs/* common/fs/ || true
+          cp -v susfs/kernel_patches/include/linux/* common/include/linux/ || true
           cd common
-          patch -p1 --fuzz=3 --forward --no-backup-if-mismatch \
-            < ../susfs/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch || true
+          if ! grep -q "susfs_init\|susfs_run_sus_path_loop" fs/namespace.c; then
+            patch -p1 --fuzz=3 --forward --no-backup-if-mismatch \
+              < ../susfs/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch || \
+              echo "[WARN] susfs fs patch already applied or merged"
+          fi
 
-      - name: Apply Revenant patches (RASP variants only)
+      - name: Apply Revenant RASP patches (rasp/full variants)
         if: ${{ contains(fromJson('["rasp","full"]'), inputs.variant) }}
         run: |
           cd ws/common
           for p in ../../patches/*.patch; do
-            echo "applying $(basename $p)"
+            echo "[+] applying $(basename $p)"
             patch -p1 --fuzz=3 --forward --no-backup-if-mismatch < "$p" || true
           done
 
-      - name: Apply config fragment
+      - name: Apply config fragment + LOCALVERSION
         run: |
           cp configs/revenant-${{ inputs.variant }}.fragment \
             ws/common/arch/arm64/configs/revenant.fragment
+          cat >> ws/common/arch/arm64/configs/revenant.fragment <<EOF
+
+          # Revenant LOCALVERSION (preserve android15-8-4k suffix)
+          CONFIG_LOCALVERSION="-Revenant-${{ inputs.variant }}-v1.0"
+          # CONFIG_LOCALVERSION_AUTO is not set
+          EOF
+          echo "=== final fragment ==="
           cat ws/common/arch/arm64/configs/revenant.fragment
 
-      - name: Build with full LTO/PGO/BOLT
+      - name: Build kernel_aarch64 (full LTO)
         run: |
           cd ws
-          tools/bazel run --lto=full \
+          tools/bazel build --lto=full \
             --defconfig_fragment=//common:arch/arm64/configs/revenant.fragment \
-            //common:kernel_aarch64_dist 2>&1 | tail -50
+            //common:kernel_aarch64_dist 2>&1 | tail -60
           mkdir -p "$GITHUB_WORKSPACE/dist"
           IMG=$(find -L bazel-bin -name Image -path '*kernel_aarch64*' | head -1)
           test -n "$IMG"
           cp -v "$IMG" "$GITHUB_WORKSPACE/dist/Image"
+          echo "=== banner ==="
           strings "$GITHUB_WORKSPACE/dist/Image" | grep "^Linux version" | head -1
 
       - name: Package AnyKernel3
@@ -127,7 +143,7 @@ jobs:
           cat > ak3/anykernel.sh <<'EOF'
           ### AnyKernel3 — Revenant
           properties() { '
-          kernel.string=Revenant
+          kernel.string=Revenant Kernel by Kaua
           do.devicecheck=1
           do.modules=0
           do.systemless=1
@@ -137,14 +153,14 @@ jobs:
           device.name2=24129RT7CC
           supported.versions=15-16
           '; }
-          block=auto;
+          block=init_boot;
           is_slot_device=auto;
           ramdisk_compression=auto;
           patch_vbmeta_flag=auto;
+          no_magisk_check=1;
           . tools/ak3-core.sh;
-          split_boot;
-          flash_boot;
-          flash_dtbo;
+          dump_boot;
+          write_boot;
           EOF
           cp dist/Image ak3/Image
           cd ak3
@@ -166,11 +182,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: Beta-v${{ inputs.variant == 'base' && '1.0' || inputs.variant == 'perf' && '1.1' || inputs.variant == 'rasp' && '1.2' || '1.3' }}
-          name: Revenant ${{ inputs.variant }}
+          name: Revenant Beta v${{ inputs.variant == 'base' && '1.0' || inputs.variant == 'perf' && '1.1' || inputs.variant == 'rasp' && '1.2' || '1.3' }}
           body: |
             Build #${{ github.run_number }}
             Variant: `${{ inputs.variant }}`
             Base: Linux 6.6.127 `android15-8-4k`
-            KernelSU-Next ${{ env.KSU_NEXT_REF }} + SuSFS
+            KernelSU-Next next-susfs + SuSFS v2.1.0
           files: Revenant-*.zip
           prerelease: true

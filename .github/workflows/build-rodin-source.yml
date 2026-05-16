@@ -1,0 +1,148 @@
+name: Build Revenant (rodin source) — v2 experimental
+
+# Build using Xiaomi published rodin source instead of AOSP common.
+# Higher risk, higher reward — can touch MTK-specific scheduler/FPSGO/task_turbo.
+# Only run after Beta-v1.0 (AOSP common) is confirmed working.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Create GitHub release'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  XIAOMI_KERNEL_REPO: https://github.com/MiCode/Xiaomi_Kernel_OpenSource
+  XIAOMI_KERNEL_BRANCH: bsp-rodin-v-oss
+  MTK_MODULES_REPO: https://github.com/MiCode/MTK_kernel_modules
+  MTK_MODULES_BRANCH: bsp-rodin-v-oss
+  KSU_OWNER: pershoot
+  KSU_REPO: KernelSU-Next
+  KSU_REF: next-susfs
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
+          df -h
+
+      - name: Install deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            git curl wget bc bison flex libssl-dev make gcc \
+            libelf-dev build-essential python3 python3-pip \
+            zip unzip rsync cpio ccache lz4 zstd perl xz-utils
+          mkdir -p "$HOME/bin"
+          curl -sSL https://storage.googleapis.com/git-repo-downloads/repo > "$HOME/bin/repo"
+          chmod a+x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          git config --global user.name "ci"
+          git config --global user.email "ci@local"
+
+      - name: Sync AOSP manifest (build infra)
+        run: |
+          mkdir -p ws && cd ws
+          repo init --depth=1 -u https://android.googlesource.com/kernel/manifest \
+            -b common-android15-6.6 -m default.xml
+          repo sync -c -j$(nproc) --no-tags --no-clone-bundle --fail-fast
+
+      - name: Replace common/ with Xiaomi rodin source
+        run: |
+          cd ws
+          rm -rf common
+          git clone --depth=1 -b ${{ env.XIAOMI_KERNEL_BRANCH }} \
+            ${{ env.XIAOMI_KERNEL_REPO }} common
+          head -5 common/Makefile
+
+      - name: Clone MTK vendor modules
+        run: |
+          cd ws
+          git clone --depth=1 -b ${{ env.MTK_MODULES_BRANCH }} \
+            ${{ env.MTK_MODULES_REPO }} vendor_modules
+          ls vendor_modules/
+
+      - name: Clean dirty markers
+        run: |
+          cd ws
+          sed -i 's/-dirty//g; s/ -dirty//g' common/scripts/setlocalversion 2>/dev/null || true
+          sed -i '/stable_scmversion_cmd/s/-maybe-dirty//g' \
+            build/kernel/kleaf/impl/stamp.bzl 2>/dev/null || true
+
+      - name: Integrate KernelSU-Next + SuSFS
+        run: |
+          cd ws/common
+          curl -LSs "https://raw.githubusercontent.com/${{ env.KSU_OWNER }}/${{ env.KSU_REPO }}/${{ env.KSU_REF }}/kernel/setup.sh" \
+            | bash -s ${{ env.KSU_REF }}
+
+      - name: Build with rodin source
+        run: |
+          cd ws
+          # rodin source uses Xiaomi's BUILD.bazel — may differ from AOSP common
+          tools/bazel build --lto=full //common:kernel_aarch64_dist 2>&1 | tail -60
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          IMG=$(find -L bazel-bin -name Image -path '*kernel_aarch64*' | head -1)
+          test -n "$IMG"
+          cp -v "$IMG" "$GITHUB_WORKSPACE/dist/Image"
+          strings "$GITHUB_WORKSPACE/dist/Image" | grep "^Linux version" | head -1
+
+      - name: Package AnyKernel3
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
+          rm -rf ak3/.git ak3/README.md
+          cat > ak3/anykernel.sh <<'EOF'
+          ### AnyKernel3 — Revenant v2 (rodin source)
+          properties() { '
+          kernel.string=Revenant Kernel v2 (rodin source) by Kaua
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          device.name1=rodin
+          device.name2=24129RT7CC
+          supported.versions=15-16
+          '; }
+          block=init_boot;
+          is_slot_device=auto;
+          ramdisk_compression=auto;
+          patch_vbmeta_flag=auto;
+          no_magisk_check=1;
+          . tools/ak3-core.sh;
+          dump_boot;
+          write_boot;
+          EOF
+          cp dist/Image ak3/Image
+          cd ak3
+          zip -r9 "../Revenant-v2-rodin-${{ github.run_number }}.zip" * -x .git
+          cd ..
+          ls -lh Revenant-v2-*.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Revenant-v2-rodin-${{ github.run_number }}
+          path: |
+            Revenant-v2-*.zip
+            dist/Image
+          retention-days: 30
+
+      - name: Create release
+        if: ${{ inputs.release == true }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: Beta-v2.0
+          name: Revenant Beta v2.0 (experimental — rodin source)
+          body: |
+            Build using Xiaomi published rodin source.
+            Experimental — flash with caution.
+          files: Revenant-v2-*.zip
+          prerelease: true
