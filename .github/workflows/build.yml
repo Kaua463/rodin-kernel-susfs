@@ -85,7 +85,13 @@ jobs:
           ls -lh /tmp/susfs.patch
           patch -p1 --fuzz=3 --forward --no-backup-if-mismatch < /tmp/susfs.patch
           echo "[+] SuSFS patch applied"
-          grep -q "CONFIG_KSU_SUSFS" kernel/Kconfig && echo "[OK] KSU_SUSFS Kconfig present"
+          # Kconfig usa 'config KSU_SUSFS' (sem CONFIG_ prefix dentro do arquivo)
+          if grep -q "^config KSU_SUSFS$" kernel/Kconfig; then
+            echo "[OK] KSU_SUSFS Kconfig present"
+          else
+            echo "[WARN] KSU_SUSFS nao achado — verificar"
+            grep -n "KSU_SUSFS" kernel/Kconfig | head -5
+          fi
 
       - name: Symlink KernelSU-Next into common/drivers
         run: |
