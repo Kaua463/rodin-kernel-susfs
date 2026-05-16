@@ -3,16 +3,6 @@ name: Build Revenant Kernel
 on:
   workflow_dispatch:
     inputs:
-      variant:
-        description: 'Variant to build'
-        required: true
-        default: 'base'
-        type: choice
-        options:
-          - base   # Beta-v1.0
-          - perf   # Beta-v1.1
-          - rasp   # Beta-v1.2
-          - full   # Beta-v1.3
       release:
         description: 'Create GitHub release'
         required: false
@@ -22,9 +12,10 @@ on:
 env:
   KMI_BRANCH: common-android15-6.6
   KMI_TAG: android15-6.6.127_r00
-  KSU_OWNER: pershoot
+  KSU_OWNER: KernelSU-Next
   KSU_REPO: KernelSU-Next
-  KSU_REF: next-susfs
+  KSU_REF: dev
+  SUSFS_PATCH: wild/ksun-0daf55582-susfs-v2.1.0-e259e7d6.patch
 
 jobs:
   build:
@@ -65,9 +56,7 @@ jobs:
           git fetch https://android.googlesource.com/kernel/common.git \
             tag ${{ env.KMI_TAG }} --depth=1
           git checkout ${{ env.KMI_TAG }}
-          echo "=== version ==="
           head -5 Makefile
-          echo "=== KMI_GENERATION ==="
           grep KMI_GENERATION build.config.common
 
       - name: Clean scmversion dirty markers
@@ -77,44 +66,45 @@ jobs:
           sed -i '/stable_scmversion_cmd/s/-maybe-dirty//g' \
             build/kernel/kleaf/impl/stamp.bzl 2>/dev/null || true
 
-      - name: Integrate KernelSU-Next (pershoot/next-susfs)
+      - name: Clone KernelSU-Next ${{ env.KSU_REF }}
         run: |
-          cd ws/common
-          curl -LSs "https://raw.githubusercontent.com/${{ env.KSU_OWNER }}/${{ env.KSU_REPO }}/${{ env.KSU_REF }}/kernel/setup.sh" \
-            | bash -s ${{ env.KSU_REF }}
-          grep -q "config KSU_SUSFS" drivers/kernelsu/Kconfig
-          grep -q "config KSU_THRONE_TRACKER_ALWAYS_THREADED" drivers/kernelsu/Kconfig
-          echo "[OK] KSU+SuSFS Kconfig integrated"
+          cd ws
+          git clone --depth=1 -b ${{ env.KSU_REF }} \
+            https://github.com/${{ env.KSU_OWNER }}/${{ env.KSU_REPO }}.git KernelSU-Next
+          cd KernelSU-Next
+          git rev-list --count HEAD
+          echo "[+] KSU commit count = $(git rev-list --count HEAD) → KSU_VERSION ~= $((30000 + $(git rev-list --count HEAD)))"
 
-      - name: Verify SuSFS already integrated by pershoot fork
+      - name: Apply WildKernels SuSFS patch to KSU source
         run: |
-          cd ws/common
-          # pershoot/next-susfs ja vem com susfs.h e fs hooks — nao precisa copiar do simonpunk
-          test -f include/linux/susfs.h && echo "[OK] susfs.h present"
-          test -f drivers/kernelsu/core_hook.c && echo "[OK] KSU core_hook.c present"
-          grep -q "susfs_update_sus_kstat" drivers/kernelsu/core_hook.c && \
-            echo "[OK] KSU + SuSFS calls match fork headers"
+          cd ws/KernelSU-Next
+          curl -fSL -o /tmp/susfs.patch \
+            "https://raw.githubusercontent.com/WildKernels/kernel_patches/main/${{ env.SUSFS_PATCH }}"
+          ls -lh /tmp/susfs.patch
+          patch -p1 --fuzz=3 --forward --no-backup-if-mismatch < /tmp/susfs.patch
+          echo "[+] SuSFS patch applied"
+          grep -q "CONFIG_KSU_SUSFS" kernel/Kconfig && echo "[OK] KSU_SUSFS Kconfig present"
 
-      - name: Apply Revenant RASP patches (rasp/full variants)
-        if: ${{ contains(fromJson('["rasp","full"]'), inputs.variant) }}
+      - name: Symlink KernelSU-Next into common/drivers
         run: |
           cd ws/common
-          for p in ../../patches/*.patch; do
-            echo "[+] applying $(basename $p)"
-            patch -p1 --fuzz=3 --forward --no-backup-if-mismatch < "$p" || true
-          done
+          ln -sf ../../KernelSU-Next/kernel drivers/kernelsu
+          grep -q "kernelsu" drivers/Makefile || \
+            printf "\nobj-\$(CONFIG_KSU) += kernelsu/\n" >> drivers/Makefile
+          grep -q "drivers/kernelsu/Kconfig" drivers/Kconfig || \
+            sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+          echo "[+] KSU integrated"
 
       - name: Apply config fragment + LOCALVERSION
         run: |
-          cp configs/revenant-${{ inputs.variant }}.fragment \
+          cp configs/revenant-base.fragment \
             ws/common/arch/arm64/configs/revenant.fragment
-          cat >> ws/common/arch/arm64/configs/revenant.fragment <<EOF
+          cat >> ws/common/arch/arm64/configs/revenant.fragment <<'EOF'
 
           # Revenant LOCALVERSION (preserve android15-8-4k suffix)
-          CONFIG_LOCALVERSION="-Revenant-${{ inputs.variant }}-v1.0"
+          CONFIG_LOCALVERSION="-Revenant-Beta-v1.0"
           # CONFIG_LOCALVERSION_AUTO is not set
           EOF
-          echo "=== final fragment ==="
           cat ws/common/arch/arm64/configs/revenant.fragment
 
       - name: Build kernel_aarch64 (full LTO)
@@ -122,13 +112,15 @@ jobs:
           cd ws
           tools/bazel build --lto=full \
             --defconfig_fragment=//common:arch/arm64/configs/revenant.fragment \
-            //common:kernel_aarch64_dist 2>&1 | tail -60
+            //common:kernel_aarch64_dist 2>&1 | tail -80
           mkdir -p "$GITHUB_WORKSPACE/dist"
           IMG=$(find -L bazel-bin -name Image -path '*kernel_aarch64*' | head -1)
           test -n "$IMG"
           cp -v "$IMG" "$GITHUB_WORKSPACE/dist/Image"
           echo "=== banner ==="
           strings "$GITHUB_WORKSPACE/dist/Image" | grep "^Linux version" | head -1
+          echo "=== KSU version reportada ==="
+          strings "$GITHUB_WORKSPACE/dist/Image" | grep -E "KernelSU.*version|SUSFS_VERSION" | head -3
 
       - name: Package AnyKernel3
         run: |
@@ -159,16 +151,16 @@ jobs:
           EOF
           cp dist/Image ak3/Image
           cd ak3
-          zip -r9 "../Revenant-${{ inputs.variant }}-${{ github.run_number }}.zip" * -x .git
+          zip -r9 "../Revenant-Beta-v1.0-${{ github.run_number }}.zip" * -x .git
           cd ..
-          ls -lh Revenant-*.zip
+          ls -lh Revenant-Beta-*.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Revenant-${{ inputs.variant }}-${{ github.run_number }}
+          name: Revenant-Beta-v1.0-${{ github.run_number }}
           path: |
-            Revenant-*.zip
+            Revenant-Beta-*.zip
             dist/Image
           retention-days: 30
 
@@ -176,12 +168,11 @@ jobs:
         if: ${{ inputs.release == true }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: Beta-v${{ inputs.variant == 'base' && '1.0' || inputs.variant == 'perf' && '1.1' || inputs.variant == 'rasp' && '1.2' || '1.3' }}
-          name: Revenant Beta v${{ inputs.variant == 'base' && '1.0' || inputs.variant == 'perf' && '1.1' || inputs.variant == 'rasp' && '1.2' || '1.3' }}
+          tag_name: Beta-v1.0
+          name: Revenant Beta v1.0
           body: |
             Build #${{ github.run_number }}
-            Variant: `${{ inputs.variant }}`
             Base: Linux 6.6.127 `android15-8-4k`
-            KernelSU-Next next-susfs + SuSFS v2.1.0
-          files: Revenant-*.zip
+            KernelSU-Next dev + SuSFS v2.1.0 (WildKernels patch)
+          files: Revenant-Beta-*.zip
           prerelease: true
