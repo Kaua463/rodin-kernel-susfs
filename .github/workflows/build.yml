@@ -14,9 +14,13 @@ env:
   KMI_TAG: android15-6.6.127_r00
   KSU_OWNER: KernelSU-Next
   KSU_REPO: KernelSU-Next
-  # commit exato que o patch WildKernels espera (genera KSU_VERSION 33131)
-  KSU_COMMIT: 0daf555826d83a0f68ba63d503b4a6e95ff80538
-  SUSFS_PATCH: wild/ksun-0daf55582-susfs-v2.1.0-e259e7d6.patch
+  # commit hash do KSU-Next "source: sync with upstream" (13/Mai/2026)
+  # Kbuild hash fd31bb51 bate com base do patch cctv18 10_enable_susfs_for_ksu.patch
+  KSU_COMMIT: 1d919700e46568436b993b57d3a8e3a3fd7f27b6
+  SUSFS_OWNER: cctv18
+  SUSFS_REPO: susfs4oki
+  SUSFS_BRANCH: oki-android15-6.6
+  KSU_VERSION_FORCED: 33150
 
 jobs:
   build:
@@ -67,31 +71,53 @@ jobs:
           sed -i '/stable_scmversion_cmd/s/-maybe-dirty//g' \
             build/kernel/kleaf/impl/stamp.bzl 2>/dev/null || true
 
-      - name: Clone KernelSU-Next at exact commit ${{ env.KSU_COMMIT }}
+      - name: Clone KernelSU-Next at commit ${{ env.KSU_COMMIT }}
         run: |
           cd ws
-          # Need full clone to checkout specific commit (shallow doesn't work)
           git clone https://github.com/${{ env.KSU_OWNER }}/${{ env.KSU_REPO }}.git KernelSU-Next
           cd KernelSU-Next
           git checkout ${{ env.KSU_COMMIT }}
-          COUNT=$(git rev-list --count HEAD)
-          echo "[+] KSU at commit $(git rev-parse --short HEAD), count=$COUNT, KSU_VERSION=$((30000 + COUNT))"
+          echo "[+] KSU at $(git rev-parse --short HEAD): $(git log -1 --pretty=%s)"
 
-      - name: Apply WildKernels SuSFS patch to KSU source
+      - name: Clone susfs4oki ${{ env.SUSFS_BRANCH }}
+        run: |
+          cd ws
+          git clone --depth=1 -b ${{ env.SUSFS_BRANCH }} \
+            https://github.com/${{ env.SUSFS_OWNER }}/${{ env.SUSFS_REPO }}.git susfs
+          ls susfs/kernel_patches/
+
+      - name: Apply cctv18 SuSFS kernel patch to common/
+        run: |
+          cd ws/common
+          # patch traz susfs.h + susfs_def.h + fs/susfs.c embedded + hooks em fs/* e kernel/*
+          # 1 hunk failed esperado em fs/proc/task_mmu.c (SUS_MAP) — tolera com --forward
+          patch -p1 --fuzz=3 --forward --no-backup-if-mismatch \
+            < ../susfs/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch || \
+            echo "[WARN] alguns hunks failed (esperado SUS_MAP) — continuar"
+          # confirmar susfs.h foi criado
+          ls -lh include/linux/susfs.h include/linux/susfs_def.h fs/susfs.c
+          echo "[+] SuSFS source files presentes"
+
+      - name: Apply cctv18 KSU patch to KSU source
         run: |
           cd ws/KernelSU-Next
-          curl -fSL -o /tmp/susfs.patch \
-            "https://raw.githubusercontent.com/WildKernels/kernel_patches/main/${{ env.SUSFS_PATCH }}"
-          ls -lh /tmp/susfs.patch
-          patch -p1 --fuzz=3 --forward --no-backup-if-mismatch < /tmp/susfs.patch
-          echo "[+] SuSFS patch applied"
-          # Kconfig usa 'config KSU_SUSFS' (sem CONFIG_ prefix dentro do arquivo)
+          patch -p1 --fuzz=3 --forward --no-backup-if-mismatch \
+            < ../susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch
+          echo "[+] KSU SuSFS patch applied"
           if grep -q "^config KSU_SUSFS$" kernel/Kconfig; then
-            echo "[OK] KSU_SUSFS Kconfig present"
-          else
-            echo "[WARN] KSU_SUSFS nao achado — verificar"
-            grep -n "KSU_SUSFS" kernel/Kconfig | head -5
+            echo "[OK] CONFIG_KSU_SUSFS present"
           fi
+
+      - name: Force KSU_VERSION (sandbox Bazel loses .git)
+        run: |
+          cd ws/KernelSU-Next
+          cat >> kernel/Kbuild <<EOF
+
+          # Revenant: sandbox loses .git → fallback eh 1. Force versao real.
+          ccflags-y += -DKSU_VERSION=${{ env.KSU_VERSION_FORCED }}
+          ccflags-y += -DKSU_VERSION_TAG=\\"v3.2.0\\"
+          EOF
+          echo "[+] KSU_VERSION forçado = ${{ env.KSU_VERSION_FORCED }}"
 
       - name: Symlink KernelSU-Next into common/drivers
         run: |
@@ -127,8 +153,8 @@ jobs:
           cp -v "$IMG" "$GITHUB_WORKSPACE/dist/Image"
           echo "=== banner ==="
           strings "$GITHUB_WORKSPACE/dist/Image" | grep "^Linux version" | head -1
-          echo "=== KSU version reportada ==="
-          strings "$GITHUB_WORKSPACE/dist/Image" | grep -E "KernelSU.*version|SUSFS_VERSION" | head -3
+          echo "=== KSU + SuSFS strings ==="
+          strings "$GITHUB_WORKSPACE/dist/Image" | grep -E "KSU_VERSION|SUSFS_VERSION|susfs is initialized" | head -3
 
       - name: Package AnyKernel3
         run: |
@@ -181,6 +207,6 @@ jobs:
           body: |
             Build #${{ github.run_number }}
             Base: Linux 6.6.127 `android15-8-4k`
-            KernelSU-Next dev + SuSFS v2.1.0 (WildKernels patch)
+            KernelSU-Next + SuSFS v2.1.0 (cctv18/susfs4oki)
           files: Revenant-Beta-*.zip
           prerelease: true
