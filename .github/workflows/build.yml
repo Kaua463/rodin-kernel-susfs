@@ -126,6 +126,8 @@ jobs:
           sed -i 's|ccflags-y += -DKSU_VERSION=16|ccflags-y += -DKSU_VERSION=${{ env.KSU_VERSION_FORCED }}|' kernel/Kbuild
           sed -i 's|KSU_EXPECTED_HASH := c371061b19d8c7d7d6133c6a9bafe198fa944e50c1b31c9d8daa8d7f1fc2d2d6|KSU_EXPECTED_HASH := 79e590113c4c4c0c222978e413a5faa801666957b1212a328e46c00c69821bf7|' kernel/Kbuild
           sed -i 's|KSU_EXPECTED_SIZE := 0x033b|KSU_EXPECTED_SIZE := 0x3e6|' kernel/Kbuild
+          # cctv18 patch removeu KSU_VERSION_TAG — mas supercall/dispatch.c usa essa macro. Define manualmente:
+          echo 'ccflags-y += -DKSU_VERSION_TAG=\"v3.2.0\"' >> kernel/Kbuild
           # Verificar
           echo "[+] KSU_VERSION fallback:"
           grep -n "KSU_VERSION=" kernel/Kbuild
