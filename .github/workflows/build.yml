@@ -14,7 +14,8 @@ env:
   KMI_TAG: android15-6.6.127_r00
   KSU_OWNER: KernelSU-Next
   KSU_REPO: KernelSU-Next
-  KSU_REF: dev
+  # commit exato que o patch WildKernels espera (genera KSU_VERSION 33131)
+  KSU_COMMIT: 0daf555826d83a0f68ba63d503b4a6e95ff80538
   SUSFS_PATCH: wild/ksun-0daf55582-susfs-v2.1.0-e259e7d6.patch
 
 jobs:
@@ -66,14 +67,15 @@ jobs:
           sed -i '/stable_scmversion_cmd/s/-maybe-dirty//g' \
             build/kernel/kleaf/impl/stamp.bzl 2>/dev/null || true
 
-      - name: Clone KernelSU-Next ${{ env.KSU_REF }}
+      - name: Clone KernelSU-Next at exact commit ${{ env.KSU_COMMIT }}
         run: |
           cd ws
-          git clone --depth=1 -b ${{ env.KSU_REF }} \
-            https://github.com/${{ env.KSU_OWNER }}/${{ env.KSU_REPO }}.git KernelSU-Next
+          # Need full clone to checkout specific commit (shallow doesn't work)
+          git clone https://github.com/${{ env.KSU_OWNER }}/${{ env.KSU_REPO }}.git KernelSU-Next
           cd KernelSU-Next
-          git rev-list --count HEAD
-          echo "[+] KSU commit count = $(git rev-list --count HEAD) → KSU_VERSION ~= $((30000 + $(git rev-list --count HEAD)))"
+          git checkout ${{ env.KSU_COMMIT }}
+          COUNT=$(git rev-list --count HEAD)
+          echo "[+] KSU at commit $(git rev-parse --short HEAD), count=$COUNT, KSU_VERSION=$((30000 + COUNT))"
 
       - name: Apply WildKernels SuSFS patch to KSU source
         run: |
