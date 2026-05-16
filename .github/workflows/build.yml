@@ -86,17 +86,24 @@ jobs:
             https://github.com/${{ env.SUSFS_OWNER }}/${{ env.SUSFS_REPO }}.git susfs
           ls susfs/kernel_patches/
 
+      - name: Copy SuSFS source files BEFORE patch (README requirement)
+        run: |
+          cd ws/common
+          # README cctv18 explicit: copy ANTES do patch
+          cp -v ../susfs/kernel_patches/fs/susfs.c fs/
+          cp -v ../susfs/kernel_patches/include/linux/susfs.h include/linux/
+          cp -v ../susfs/kernel_patches/include/linux/susfs_def.h include/linux/
+          ls -lh include/linux/susfs*.h fs/susfs.c
+          echo "[+] SuSFS source files copied"
+
       - name: Apply cctv18 SuSFS kernel patch to common/
         run: |
           cd ws/common
-          # patch traz susfs.h + susfs_def.h + fs/susfs.c embedded + hooks em fs/* e kernel/*
-          # 1 hunk failed esperado em fs/proc/task_mmu.c (SUS_MAP) — tolera com --forward
+          # patch aplica hooks em fs/* e kernel/* — 1 hunk SUS_MAP esperado falhar
           patch -p1 --fuzz=3 --forward --no-backup-if-mismatch \
             < ../susfs/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch || \
             echo "[WARN] alguns hunks failed (esperado SUS_MAP) — continuar"
-          # confirmar susfs.h foi criado
-          ls -lh include/linux/susfs.h include/linux/susfs_def.h fs/susfs.c
-          echo "[+] SuSFS source files presentes"
+          echo "[+] SuSFS kernel patch applied"
 
       - name: Apply cctv18 KSU patch to KSU source
         run: |
