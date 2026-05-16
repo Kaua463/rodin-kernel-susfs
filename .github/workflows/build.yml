@@ -86,19 +86,14 @@ jobs:
           grep -q "config KSU_THRONE_TRACKER_ALWAYS_THREADED" drivers/kernelsu/Kconfig
           echo "[OK] KSU+SuSFS Kconfig integrated"
 
-      - name: Apply susfs4ksu fs hooks (if not pre-integrated)
+      - name: Verify SuSFS already integrated by pershoot fork
         run: |
-          cd ws
-          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git \
-            -b gki-android15-6.6 susfs
-          cp -v susfs/kernel_patches/fs/* common/fs/ || true
-          cp -v susfs/kernel_patches/include/linux/* common/include/linux/ || true
-          cd common
-          if ! grep -q "susfs_init\|susfs_run_sus_path_loop" fs/namespace.c; then
-            patch -p1 --fuzz=3 --forward --no-backup-if-mismatch \
-              < ../susfs/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch || \
-              echo "[WARN] susfs fs patch already applied or merged"
-          fi
+          cd ws/common
+          # pershoot/next-susfs ja vem com susfs.h e fs hooks — nao precisa copiar do simonpunk
+          test -f include/linux/susfs.h && echo "[OK] susfs.h present"
+          test -f drivers/kernelsu/core_hook.c && echo "[OK] KSU core_hook.c present"
+          grep -q "susfs_update_sus_kstat" drivers/kernelsu/core_hook.c && \
+            echo "[OK] KSU + SuSFS calls match fork headers"
 
       - name: Apply Revenant RASP patches (rasp/full variants)
         if: ${{ contains(fromJson('["rasp","full"]'), inputs.variant) }}
