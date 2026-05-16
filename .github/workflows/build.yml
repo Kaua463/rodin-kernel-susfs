@@ -115,16 +115,24 @@ jobs:
             echo "[OK] CONFIG_KSU_SUSFS present"
           fi
 
-      - name: Force KSU_VERSION (sandbox Bazel loses .git)
+      - name: Override Kbuild hardcoded values (KSU_VERSION fallback + Manager hash)
         run: |
           cd ws/KernelSU-Next
-          cat >> kernel/Kbuild <<EOF
-
-          # Revenant: sandbox loses .git → fallback eh 1. Force versao real.
-          ccflags-y += -DKSU_VERSION=${{ env.KSU_VERSION_FORCED }}
-          ccflags-y += -DKSU_VERSION_TAG=\\"v3.2.0\\"
-          EOF
-          echo "[+] KSU_VERSION forçado = ${{ env.KSU_VERSION_FORCED }}"
+          # Patch cctv18 hardcoded KSU_VERSION=16 fallback (sandbox loses .git) + weishu manager hash
+          # Trocar pelos valores corretos:
+          #   KSU_VERSION = 33150 (passa manager check 33110)
+          #   EXPECTED_HASH = 79e590113c... (KSU-Next oficial — kwlkkw manager bate)
+          #   EXPECTED_SIZE = 0x3e6 (KSU-Next manager APK size)
+          sed -i 's|ccflags-y += -DKSU_VERSION=16|ccflags-y += -DKSU_VERSION=${{ env.KSU_VERSION_FORCED }}|' kernel/Kbuild
+          sed -i 's|KSU_EXPECTED_HASH := c371061b19d8c7d7d6133c6a9bafe198fa944e50c1b31c9d8daa8d7f1fc2d2d6|KSU_EXPECTED_HASH := 79e590113c4c4c0c222978e413a5faa801666957b1212a328e46c00c69821bf7|' kernel/Kbuild
+          sed -i 's|KSU_EXPECTED_SIZE := 0x033b|KSU_EXPECTED_SIZE := 0x3e6|' kernel/Kbuild
+          # Verificar
+          echo "[+] KSU_VERSION fallback:"
+          grep -n "KSU_VERSION=" kernel/Kbuild
+          echo "[+] KSU_EXPECTED_HASH:"
+          grep -n "KSU_EXPECTED_HASH :=" kernel/Kbuild
+          echo "[+] KSU_EXPECTED_SIZE:"
+          grep -n "KSU_EXPECTED_SIZE :=" kernel/Kbuild
 
       - name: Symlink KernelSU-Next into common/drivers
         run: |
