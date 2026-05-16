@@ -1,50 +1,39 @@
 # Revenant Kernel
-
-Custom GKI kernel for **POCO X7 Pro** (codename `rodin`, MediaTek Dimensity 8400 / MT6899)
-on Android 15 / 16 HyperOS.
-
-Built from AOSP `common-android15-6.6` with **KernelSU-Next** + **SuSFS** integration,
-ZSWAP/LRU_GEN memory tuning, and CAKE qdisc networking.
-
-## Status
-
-> **🚧 Beta — work in progress.** Use at your own risk. Backups required.
+### For Poco X7 Pro (rodin)
 
 ## Details
+- **Base:** Linux 6.6.127 GKI
+- **OS:** HyperOS 3 | Android 16
+- **Device:** Poco X7 Pro (rodin)
 
-| | |
-|---|---|
-| Base | Linux 6.6.127 GKI `android15-8-4k` |
-| Toolchain | Android clang (PGO + BOLT + LTO + MLGO) |
-| Page size | 4K |
-| KernelSU-Next | v3.2.0 (33129) — spoofed package |
-| SuSFS | v2.1.0 (gki-android15-6.6) |
+## Changelog Beta-v1.0
+- AOSP `common-android15-6.6` pinned at 6.6.127
+- KernelSU-Next v3.2.0 (33129) integrated
+- SuSFS v2.1.0 with SUS_PATH, SUS_MOUNT, SUS_KSTAT, SPOOF_UNAME, SPOOF_CMDLINE
+- Kyber I/O scheduler as default
+- ZSWAP with LZ4 compression
+- ZRAM with lzo-rle and writeback
+- Multi-gen LRU enabled at boot
+- PSI always on
+- BBR TCP congestion control
+- CRC32 hardware acceleration
+- Built with PGO + BOLT + LTO + MLGO
 
-## Releases
-
-Each release ships an AnyKernel3 zip. Flash via Horizon Kernel Flasher or Franco Kernel Manager.
-
-| Tag | Highlights |
-|---|---|
-| `Beta-v1.0` | Baseline — KernelSU-Next + SuSFS + ZSWAP/LRU_GEN + Kyber I/O |
-| `Beta-v1.1` | Adds CAKE qdisc, BBR+TFO, autogroup scheduler, F2FS compression, CFS bandwidth |
-| `Beta-v1.2` | Adds SUS_MAP, custom RASP-defense patches (prop hook, vbmeta intercept, per-app mount NS) |
-| `Beta-v1.3` | All of v1.1 + v1.2 combined |
+## Coming next
+- **Beta-v1.1** — CAKE qdisc, TLS-in-kernel, BPF JIT, F2FS compression, autogroup scheduler, CFS bandwidth, RT group sched, io_uring
+- **Beta-v1.2** — SUS_MAP + RASP defense patches (boot-state prop spoofing, vbmeta read intercept)
+- **Beta-v1.3** — everything from v1.1 and v1.2 combined
 
 ## Requirements
-
 - Unlocked bootloader
-- Root flasher (Horizon, Franco, FKM) — no custom recovery
-- Stock backup of `boot_a.img`, `init_boot_a.img`, `vendor_boot_a.img`
+- KernelSU-Next or Magisk
 
 ## Installation
+No custom recovery needed for rodin (none exists). Flash from your phone:
 
-1. Download the `Revenant-<tag>-AnyKernel3.zip` from Releases
-2. Open Horizon Kernel Flasher (or Franco) and select the zip
-3. Flash, reboot
+1. Download the AnyKernel3 zip from the Releases page
+2. Open Horizon Kernel Flasher or Franco Kernel Manager
+3. Select the zip and flash
+4. Reboot
 
-To revert: flash your stock `boot_a.img` via fastboot.
-
-## Build
-
-CI: GitHub Actions. See `.github/workflows/build.yml`.
+If anything goes wrong: `fastboot flash boot boot_a.img` (your stock backup).
