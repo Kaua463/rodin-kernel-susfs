@@ -3,7 +3,6 @@
 
 # KernelSU-Next
 CONFIG_KSU=y
-CONFIG_KSU_THRONE_TRACKER_ALWAYS_THREADED=y
 
 # SuSFS — full feature set
 CONFIG_KSU_SUSFS=y
