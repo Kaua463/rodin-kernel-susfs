@@ -34,6 +34,11 @@ jobs:
           sudo docker image prune --all --force || true
           df -h
 
+      - name: Setup 10GB swap (LTO needs RAM)
+        uses: pierotofy/set-swap-space@v1.0
+        with:
+          swap-size-gb: 10
+
       - name: Install deps
         run: |
           sudo apt-get update -qq
@@ -158,12 +163,14 @@ jobs:
           EOF
           cat ws/common/arch/arm64/configs/revenant.fragment
 
-      - name: Build kernel_aarch64 (full LTO)
+      - name: Build kernel_aarch64 (thin LTO — RAM-friendly)
         run: |
           cd ws
-          tools/bazel build --lto=full \
+          # --lto=full requer 16GB+ RAM, runner so tem 14GB → OOM (exit 143)
+          # --lto=thin usa metade da RAM, ainda otimiza bem
+          tools/bazel build --lto=thin \
             --defconfig_fragment=//common:arch/arm64/configs/revenant.fragment \
-            //common:kernel_aarch64_dist 2>&1 | tail -80
+            //common:kernel_aarch64_dist
           mkdir -p "$GITHUB_WORKSPACE/dist"
           IMG=$(find -L bazel-bin -name Image -path '*kernel_aarch64*' | head -1)
           test -n "$IMG"
