@@ -56,3 +56,9 @@ CONFIG_CRYPTO_LZ4=y
 CONFIG_CRYPTO_LZO=y
 CONFIG_CRYPTO_ZSTD=y
 CONFIG_CRYPTO_DEFLATE=y
+
+# v1.1: force module load — bypass vermagic + CRC mismatch from rodin vendor modules
+# rodin vendor_dlkm modules built against g03fb7c87b0b5 (6.6.89)
+# Revenant is 6.6.127 — CRCs may differ. MODULE_FORCE_LOAD lets modprobe -f override.
+CONFIG_MODULE_FORCE_LOAD=y
+CONFIG_MODULE_FORCE_UNLOAD=y
