@@ -17,13 +17,16 @@ env:
   # commit hash do KSU-Next "source: sync with upstream" (13/Mai/2026)
   # Kbuild hash fd31bb51 bate com base do patch cctv18 10_enable_susfs_for_ksu.patch
   KSU_COMMIT: 1d919700e46568436b993b57d3a8e3a3fd7f27b6
-  # v1.2: switch cctv18/susfs4oki → simonpunk/susfs4ksu (GitLab, official upstream)
-  # cctv18 fork tinha hooks invasivos (sdcard_monitor, batch_sid, run_extra_works)
-  # que provavelmente panicam em rodin. EVONIX usa simonpunk style (binary diff).
-  SUSFS_OWNER: simonpunk
-  SUSFS_REPO: susfs4ksu
-  SUSFS_BRANCH: gki-android15-6.6
-  SUSFS_HOST: gitlab.com
+  # v1.3: revert simonpunk → cctv18 (simonpunk patches rejected em KSU-Next 1d919700,
+  # gerou ksu_lsm_hook_init undeclared no build). cctv18 fork foi feito PRA KSU-Next.
+  # Os "hooks extras invasivos" do cctv18 (sdcard_monitor etc) NAO sao causa do bootloop —
+  # causa real é module loader sem patch "load anyway" (claim 3 da auditoria, confirmado
+  # via strings binarias EVONIX vs Revenant). Fix: aplicar patch no module loader em
+  # step dedicado (proxima sessao).
+  SUSFS_OWNER: cctv18
+  SUSFS_REPO: susfs4oki
+  SUSFS_BRANCH: oki-android15-6.6
+  SUSFS_HOST: github.com
   KSU_VERSION_FORCED: 33150
 
 jobs:
@@ -108,40 +111,84 @@ jobs:
             https://${{ env.SUSFS_HOST }}/${{ env.SUSFS_OWNER }}/${{ env.SUSFS_REPO }}.git susfs
           ls susfs/kernel_patches/
 
-      - name: Copy SuSFS source files BEFORE patch (simonpunk README item 5,6)
+      - name: Copy SuSFS source files BEFORE patch
         run: |
           cd ws/common
           cp -v ../susfs/kernel_patches/fs/susfs.c fs/
           cp -v ../susfs/kernel_patches/include/linux/susfs.h include/linux/
           cp -v ../susfs/kernel_patches/include/linux/susfs_def.h include/linux/
-          ls -lh include/linux/susfs*.h fs/susfs.c
           echo "[+] SuSFS source files copied"
 
-      - name: Apply simonpunk SuSFS kernel patch to common/
+      - name: Apply cctv18 SuSFS kernel patch to common/ (FAIL on .rej except SUS_MAP)
         run: |
           cd ws/common
-          # simonpunk patch original — hooks menos invasivos que cctv18
-          # SUS_MAP hunk pode falhar em fs/proc/task_mmu.c — toleramos
+          # SUS_MAP hunk em fs/proc/task_mmu.c esperado falhar (1 hunk).
+          # Outros .rej = FAIL build (auditor claim 5).
           patch -p1 --fuzz=3 --forward --no-backup-if-mismatch \
-            < ../susfs/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch || \
-            echo "[WARN] alguns hunks failed (SUS_MAP esperado) — continuar"
-          echo "[+] SuSFS kernel patch applied"
+            < ../susfs/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch || true
+          # Strict check: tolerar ONLY task_mmu.c.rej (SUS_MAP)
+          REJ=$(find . -name "*.rej" | grep -v "task_mmu.c.rej" || true)
+          if [ -n "$REJ" ]; then
+            echo "[FAIL] Unexpected .rej files:"
+            echo "$REJ"
+            for f in $REJ; do echo "=== $f ==="; cat "$f"; done
+            exit 1
+          fi
+          echo "[+] SuSFS kernel patch applied (only SUS_MAP rejected — OK)"
 
-      - name: Apply simonpunk KSU patch (--fuzz=5 — KSU-Next pode divergir do weishu)
+      - name: Apply cctv18 KSU patch to KSU source (STRICT — fail on any .rej)
         run: |
           cd ws/KernelSU-Next
-          # simonpunk patch foi feito contra weishu/KernelSU. KSU-Next pode ter
-          # diverged → maior fuzz + ignore rejects pra ver o que aplica.
-          patch -p1 --fuzz=5 --forward --no-backup-if-mismatch \
-            < ../susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || \
-            echo "[WARN] alguns hunks KSU patch failed — verificar"
-          echo "[+] KSU SuSFS patch applied"
-          if grep -q "^config KSU_SUSFS$" kernel/Kconfig; then
-            echo "[OK] CONFIG_KSU_SUSFS present"
-          else
-            echo "[FAIL] CONFIG_KSU_SUSFS missing — adicionar manualmente"
-            cat kernel/Kconfig | grep -i susfs | head -5
+          patch -p1 --fuzz=3 --forward --no-backup-if-mismatch \
+            < ../susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch
+          # Auditor claim 5: NEVER tolerate KSU patch failures — gera undefined symbols
+          if find . -name "*.rej" -print -quit | grep -q .; then
+            echo "[FAIL] KSU patch had rejects:"
+            find . -name "*.rej" -exec sh -c 'echo "=== $1 ==="; cat "$1"' _ {} \;
+            exit 1
           fi
+          echo "[+] KSU SuSFS patch applied clean"
+          grep -q "^config KSU_SUSFS$" kernel/Kconfig || { echo "[FAIL] CONFIG_KSU_SUSFS missing"; exit 1; }
+
+      - name: Patch module loader (load_anyway on CRC/vermagic mismatch) — v1.3 ROOT FIX
+        run: |
+          cd ws/common
+          # Auditor claim 3: EVONIX binary tem "load anyway" + "loading anyway" strings,
+          # Revenant nao. Confirma EVONIX tem patch que downgrada module load ERROR → WARN.
+          # Esse patch é o que permite EVONIX (6.6.127) carregar rodin vendor_dlkm modules
+          # (6.6.89) apesar de CRC mismatch. MODULE_FORCE_LOAD=y sozinho nao basta porque
+          # Android init nao passa --force flag pra modprobe.
+          #
+          # Patch:
+          # 1. kernel/module/version.c::check_version() — retornar 1 (load) ao inves de 0 (reject)
+          #    quando CRC mismatch + adicionar "load anyway" no print
+          # 2. kernel/module/main.c::check_modinfo() — vermagic mismatch nao retorna ENOEXEC
+
+          # version.c: trocar return 0 dentro de check_version (apos disagrees print)
+          sed -i.bak '
+          /int check_version/,/^}/ {
+              s|pr_warn("%s: disagrees about version of symbol %s\\n",|pr_warn("%s: disagrees about version of symbol, load anyway %s\\n",|
+              s|return 0;|return 1; /* v1.3 force load */|
+          }' kernel/module/version.c
+
+          # main.c: vermagic mismatch warning + continue
+          # Looking for: if (!same_magic(modmagic, vermagic, ...)) { error; return -ENOEXEC; }
+          # Change to: just warn + continue
+          if grep -q "version magic.*should be" kernel/module/main.c; then
+            sed -i.bak '
+            /if (!same_magic(modmagic, vermagic/,/return -ENOEXEC;/ {
+                s|pr_err("%s: version magic|pr_warn("%s: version magic|
+                s|should be \x27%s\x27"|should be \x27%s\x27, loading anyway"|
+                s|return -ENOEXEC;|/* v1.3 load anyway */|
+            }' kernel/module/main.c
+          fi
+
+          # Verify patches applied
+          echo "===check version.c==="
+          grep -A1 "disagrees about version" kernel/module/version.c | head -4
+          echo "===check main.c==="
+          grep -B1 -A2 "version magic" kernel/module/main.c | head -10
+          echo "[+] Module loader patched: vendor modules loadable apesar de CRC/vermagic mismatch"
 
       - name: Override Kbuild hardcoded values (KSU_VERSION fallback + Manager hash)
         run: |
@@ -209,9 +256,9 @@ jobs:
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
           rm -rf ak3/.git ak3/README.md
           cat > ak3/anykernel.sh <<'EOF'
-          ### AnyKernel3 — Revenant v1.2
+          ### AnyKernel3 — Revenant v1.3
           properties() { '
-          kernel.string=Revenant Kernel v1.2 by Kaua
+          kernel.string=Revenant Kernel v1.3 by Kaua
           do.devicecheck=0
           do.modules=0
           do.systemless=1
@@ -219,27 +266,34 @@ jobs:
           do.cleanuponabort=0
           supported.versions=15-16
           '; }
-          # rodin layout: kernel mora em /dev/block/by-name/boot (NÃO init_boot)
-          # EVONIX usa block=boot — confirmado por extração binario release v2.0
+          # rodin layout: kernel mora em /dev/block/by-name/boot
+          # boot.img tem kernel_size>0 ramdisk_size=0; init_boot tem ramdisk separado
+          # AnyKernel dump_boot chama unpack_ramdisk → abort se ramdisk_size=0
+          # Fix: copiar logic EVONIX literal (auditor claim 2)
           block=boot;
           is_slot_device=auto;
           ramdisk_compression=auto;
           patch_vbmeta_flag=auto;
           no_magisk_check=1;
           . tools/ak3-core.sh;
-          dump_boot;
-          write_boot;
+          if [ -L "/dev/block/bootdevice/by-name/init_boot_a" -o -L "/dev/block/by-name/init_boot_a" ]; then
+              split_boot;
+              flash_boot;
+          else
+              dump_boot;
+              write_boot;
+          fi;
           EOF
           cp dist/Image ak3/Image
           cd ak3
-          zip -r9 "../Revenant-Beta-v1.2-${{ github.run_number }}.zip" * -x .git
+          zip -r9 "../Revenant-Beta-v1.3-${{ github.run_number }}.zip" * -x .git
           cd ..
           ls -lh Revenant-Beta-*.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Revenant-Beta-v1.2-${{ github.run_number }}
+          name: Revenant-Beta-v1.3-${{ github.run_number }}
           path: |
             Revenant-Beta-*.zip
             dist/Image
@@ -249,8 +303,8 @@ jobs:
         if: ${{ inputs.release == true }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: Beta-v1.2
-          name: Revenant Beta v1.2
+          tag_name: Beta-v1.3
+          name: Revenant Beta v1.3
           body: |
             Build #${{ github.run_number }}
             Base: Linux 6.6.127 `android15-8-4k`
