@@ -80,17 +80,18 @@ jobs:
           sed -i '/stable_scmversion_cmd/s/-maybe-dirty//g' \
             build/kernel/kleaf/impl/stamp.bzl 2>/dev/null || true
 
-      - name: Delete GKI KMI symbol filter (v1.2 FIX bootloop)
+      - name: Empty GKI KMI symbol filter (v1.2 FIX bootloop)
         run: |
           cd ws/common
           # simonpunk README item 11: "necessary to delete abi_gki_protected_exports_aarch64,
           # otherwise some modules like WiFi will not work"
-          # GKI 2.0 filtra exports → vendor modules MTK do rodin (wlan/bt/touch)
-          # nao acham symbols → load fail silencioso → bootloop em init
-          rm -f android/abi_gki_protected_exports_aarch64 \
-                android/abi_gki_protected_exports_x86_64
-          echo "[+] Protected exports filter REMOVED — kernel exporta todos symbols"
-          ls android/ | head -10
+          # MAS BUILD.bazel referencia esse arquivo → deletar quebra build.
+          # Solução: TRUNCAR pra zero bytes → arquivo existe (Bazel feliz)
+          # mas SEM symbols filtrados → kernel exporta TUDO → vendor modules OK
+          : > android/abi_gki_protected_exports_aarch64
+          : > android/abi_gki_protected_exports_x86_64
+          echo "[+] Protected exports filter EMPTIED — kernel exports unrestricted"
+          ls -lh android/abi_gki_protected_exports_*
 
       - name: Clone KernelSU-Next at commit ${{ env.KSU_COMMIT }}
         run: |
