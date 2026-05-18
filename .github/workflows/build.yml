@@ -17,9 +17,13 @@ env:
   # commit hash do KSU-Next "source: sync with upstream" (13/Mai/2026)
   # Kbuild hash fd31bb51 bate com base do patch cctv18 10_enable_susfs_for_ksu.patch
   KSU_COMMIT: 1d919700e46568436b993b57d3a8e3a3fd7f27b6
-  SUSFS_OWNER: cctv18
-  SUSFS_REPO: susfs4oki
-  SUSFS_BRANCH: oki-android15-6.6
+  # v1.2: switch cctv18/susfs4oki → simonpunk/susfs4ksu (GitLab, official upstream)
+  # cctv18 fork tinha hooks invasivos (sdcard_monitor, batch_sid, run_extra_works)
+  # que provavelmente panicam em rodin. EVONIX usa simonpunk style (binary diff).
+  SUSFS_OWNER: simonpunk
+  SUSFS_REPO: susfs4ksu
+  SUSFS_BRANCH: gki-android15-6.6
+  SUSFS_HOST: gitlab.com
   KSU_VERSION_FORCED: 33150
 
 jobs:
@@ -76,6 +80,18 @@ jobs:
           sed -i '/stable_scmversion_cmd/s/-maybe-dirty//g' \
             build/kernel/kleaf/impl/stamp.bzl 2>/dev/null || true
 
+      - name: Delete GKI KMI symbol filter (v1.2 FIX bootloop)
+        run: |
+          cd ws/common
+          # simonpunk README item 11: "necessary to delete abi_gki_protected_exports_aarch64,
+          # otherwise some modules like WiFi will not work"
+          # GKI 2.0 filtra exports → vendor modules MTK do rodin (wlan/bt/touch)
+          # nao acham symbols → load fail silencioso → bootloop em init
+          rm -f android/abi_gki_protected_exports_aarch64 \
+                android/abi_gki_protected_exports_x86_64
+          echo "[+] Protected exports filter REMOVED — kernel exporta todos symbols"
+          ls android/ | head -10
+
       - name: Clone KernelSU-Next at commit ${{ env.KSU_COMMIT }}
         run: |
           cd ws
@@ -84,40 +100,46 @@ jobs:
           git checkout ${{ env.KSU_COMMIT }}
           echo "[+] KSU at $(git rev-parse --short HEAD): $(git log -1 --pretty=%s)"
 
-      - name: Clone susfs4oki ${{ env.SUSFS_BRANCH }}
+      - name: Clone ${{ env.SUSFS_OWNER }}/${{ env.SUSFS_REPO }} ${{ env.SUSFS_BRANCH }}
         run: |
           cd ws
           git clone --depth=1 -b ${{ env.SUSFS_BRANCH }} \
-            https://github.com/${{ env.SUSFS_OWNER }}/${{ env.SUSFS_REPO }}.git susfs
+            https://${{ env.SUSFS_HOST }}/${{ env.SUSFS_OWNER }}/${{ env.SUSFS_REPO }}.git susfs
           ls susfs/kernel_patches/
 
-      - name: Copy SuSFS source files BEFORE patch (README requirement)
+      - name: Copy SuSFS source files BEFORE patch (simonpunk README item 5,6)
         run: |
           cd ws/common
-          # README cctv18 explicit: copy ANTES do patch
           cp -v ../susfs/kernel_patches/fs/susfs.c fs/
           cp -v ../susfs/kernel_patches/include/linux/susfs.h include/linux/
           cp -v ../susfs/kernel_patches/include/linux/susfs_def.h include/linux/
           ls -lh include/linux/susfs*.h fs/susfs.c
           echo "[+] SuSFS source files copied"
 
-      - name: Apply cctv18 SuSFS kernel patch to common/
+      - name: Apply simonpunk SuSFS kernel patch to common/
         run: |
           cd ws/common
-          # patch aplica hooks em fs/* e kernel/* — 1 hunk SUS_MAP esperado falhar
+          # simonpunk patch original — hooks menos invasivos que cctv18
+          # SUS_MAP hunk pode falhar em fs/proc/task_mmu.c — toleramos
           patch -p1 --fuzz=3 --forward --no-backup-if-mismatch \
             < ../susfs/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch || \
-            echo "[WARN] alguns hunks failed (esperado SUS_MAP) — continuar"
+            echo "[WARN] alguns hunks failed (SUS_MAP esperado) — continuar"
           echo "[+] SuSFS kernel patch applied"
 
-      - name: Apply cctv18 KSU patch to KSU source
+      - name: Apply simonpunk KSU patch (--fuzz=5 — KSU-Next pode divergir do weishu)
         run: |
           cd ws/KernelSU-Next
-          patch -p1 --fuzz=3 --forward --no-backup-if-mismatch \
-            < ../susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch
+          # simonpunk patch foi feito contra weishu/KernelSU. KSU-Next pode ter
+          # diverged → maior fuzz + ignore rejects pra ver o que aplica.
+          patch -p1 --fuzz=5 --forward --no-backup-if-mismatch \
+            < ../susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || \
+            echo "[WARN] alguns hunks KSU patch failed — verificar"
           echo "[+] KSU SuSFS patch applied"
           if grep -q "^config KSU_SUSFS$" kernel/Kconfig; then
             echo "[OK] CONFIG_KSU_SUSFS present"
+          else
+            echo "[FAIL] CONFIG_KSU_SUSFS missing — adicionar manualmente"
+            cat kernel/Kconfig | grep -i susfs | head -5
           fi
 
       - name: Override Kbuild hardcoded values (KSU_VERSION fallback + Manager hash)
@@ -186,9 +208,9 @@ jobs:
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
           rm -rf ak3/.git ak3/README.md
           cat > ak3/anykernel.sh <<'EOF'
-          ### AnyKernel3 — Revenant v1.1
+          ### AnyKernel3 — Revenant v1.2
           properties() { '
-          kernel.string=Revenant Kernel v1.1 by Kaua
+          kernel.string=Revenant Kernel v1.2 by Kaua
           do.devicecheck=0
           do.modules=0
           do.systemless=1
@@ -209,14 +231,14 @@ jobs:
           EOF
           cp dist/Image ak3/Image
           cd ak3
-          zip -r9 "../Revenant-Beta-v1.1-${{ github.run_number }}.zip" * -x .git
+          zip -r9 "../Revenant-Beta-v1.2-${{ github.run_number }}.zip" * -x .git
           cd ..
           ls -lh Revenant-Beta-*.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Revenant-Beta-v1.1-${{ github.run_number }}
+          name: Revenant-Beta-v1.2-${{ github.run_number }}
           path: |
             Revenant-Beta-*.zip
             dist/Image
@@ -226,8 +248,8 @@ jobs:
         if: ${{ inputs.release == true }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: Beta-v1.1
-          name: Revenant Beta v1.1
+          tag_name: Beta-v1.2
+          name: Revenant Beta v1.2
           body: |
             Build #${{ github.run_number }}
             Base: Linux 6.6.127 `android15-8-4k`
