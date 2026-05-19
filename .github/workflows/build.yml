@@ -113,46 +113,60 @@ jobs:
           #   se NR_UNPROTECTED_SYMBOLS != 0 → enforce via bsearch
           # v1.2 esvaziou android/abi_gki_protected_exports_* mas isso só afeta UMA
           # das duas listas. Header gerado vem de outra fonte (Kleaf).
-          # Fix robusto: patch direto nas 2 funcoes → return false/true sempre.
+          # Fix robusto: substitui o file inteiro por versao minima.
+          # Funcoes publicas retornam false/true; cmp_name removido (era helper de bsearch).
           # Resultado: bluetooth.ko carrega → bt_drv_6899 ok → CONNAC2 combo
           # liga → WiFi+BT funcionam.
-          python3 - <<'PYEOF'
-          import re, sys
-          p = 'kernel/module/gki_module.c'
-          src = open(p).read()
+          # NOTA: GKI usa -Werror=unused-function, entao NAO deixar cmp_name orfao
+          # (caso contrario: error: unused function 'cmp_name' — build fail).
+          cat > kernel/module/gki_module.c <<'CFILE'
+          // SPDX-License-Identifier: GPL-2.0-only
+          /*
+           * Copyright 2022 Google LLC
+           * Author: ramjiyani@google.com (Ramji Jiyani)
+           *
+           * v1.4 Revenant: KMI symbol filtering disabled — both gate functions
+           * unconditionally return permissive values to allow vendor modules
+           * (bluetooth.ko, bt_drv_6899, etc.) to load against GKI base.
+           * See: https://github.com/Kaua463/Revenant-kernel build #25 failure logs.
+           */
 
-          def replace_body(src, fn_name, new_body):
-              pat = re.compile(r'(bool\s+' + re.escape(fn_name) + r'\s*\([^)]*\)\s*)\{', re.MULTILINE)
-              m = pat.search(src)
-              if not m:
-                  print(f'[FAIL] function {fn_name} not found', file=sys.stderr)
-                  sys.exit(1)
-              brace_open = m.end() - 1
-              depth = 0
-              for i in range(brace_open, len(src)):
-                  c = src[i]
-                  if c == '{': depth += 1
-                  elif c == '}':
-                      depth -= 1
-                      if depth == 0:
-                          return src[:brace_open] + '{\n\t(void)name;\n\t' + new_body + '\n}' + src[i+1:]
-              print(f'[FAIL] unbalanced braces in {fn_name}', file=sys.stderr)
-              sys.exit(1)
+          #include <linux/kernel.h>
 
-          src = replace_body(src, 'gki_is_module_protected_export', 'return false; /* v1.4 KMI bypass */')
-          src = replace_body(src, 'gki_is_module_unprotected_symbol', 'return true; /* v1.4 KMI bypass */')
-          open(p, 'w').write(src)
-          print('[+] gki_module.c patched')
-          PYEOF
-          # Strict verification — fail build if patches did NOT stick
-          grep -q "return false; /\* v1.4 KMI bypass" kernel/module/gki_module.c || { echo "[FAIL] protected_export patch missing"; exit 1; }
-          grep -q "return true; /\* v1.4 KMI bypass" kernel/module/gki_module.c || { echo "[FAIL] unprotected_symbol patch missing"; exit 1; }
-          # Confirm bsearch removed from public funcs (cmp_name still present is OK — static helper)
-          if grep -q "bsearch(name, gki_" kernel/module/gki_module.c; then
-            echo "[FAIL] residual bsearch call in public funcs"
+          /**
+           * gki_is_module_protected_export - Is a symbol exported from a protected GKI module?
+           *
+           * @name:	Symbol being checked against exported symbols from protected GKI modules
+           */
+          bool gki_is_module_protected_export(const char *name)
+          {
+          	(void)name;
+          	return false; /* v1.4 KMI bypass */
+          }
+
+          /**
+           * gki_is_module_unprotected_symbol - Is a symbol unprotected for unsigned module?
+           *
+           * @name:	Symbol being checked in list of unprotected symbols
+           */
+          bool gki_is_module_unprotected_symbol(const char *name)
+          {
+          	(void)name;
+          	return true; /* v1.4 KMI bypass */
+          }
+          CFILE
+          # Strict verification — fail build if file wasn't written or markers missing
+          grep -q "return false; /\* v1.4 KMI bypass" kernel/module/gki_module.c || { echo "[FAIL] protected_export marker missing"; exit 1; }
+          grep -q "return true; /\* v1.4 KMI bypass" kernel/module/gki_module.c || { echo "[FAIL] unprotected_symbol marker missing"; exit 1; }
+          if grep -q "bsearch(" kernel/module/gki_module.c; then
+            echo "[FAIL] residual bsearch call — overwrite failed"
             exit 1
           fi
-          echo "[+] gki_module.c patch verified — both KMI guards neutralized"
+          if grep -q "cmp_name" kernel/module/gki_module.c; then
+            echo "[FAIL] cmp_name still present — would break -Werror=unused-function"
+            exit 1
+          fi
+          echo "[+] gki_module.c overwritten — both KMI guards neutralized"
           echo "=== final file ==="
           cat kernel/module/gki_module.c
 
