@@ -333,15 +333,39 @@ jobs:
           echo "=== KSU + SuSFS strings ==="
           strings "$GITHUB_WORKSPACE/dist/Image" | grep -E "KSU_VERSION|SUSFS_VERSION|susfs is initialized" | head -3
 
-      - name: Package AnyKernel3
+      - name: Clone AnyKernel3 (osm0sis upstream)
         run: |
           cd "$GITHUB_WORKSPACE"
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
           rm -rf ak3/.git ak3/README.md
-          cat > ak3/anykernel.sh <<'EOF'
-          ### AnyKernel3 — Revenant v1.4
+
+      - name: Replace AnyKernel3 tools com aarch64 (v1.4.1 CRITICAL pra rodin)
+        run: |
+          cd "$GITHUB_WORKSPACE/ak3"
+          # osm0sis ships tools/ como 32-bit ARM EABI5 por default (legacy compat).
+          # rodin (POCO X7 Pro / D8400 / MT6899) é aarch64-only em Android 15+:
+          # kernel retorna ENOEXEC ao tentar exec ELF 32-bit. Horizon Kernel Flasher
+          # aborta com "busybox setup failed" ou "Repacking image failed".
+          # Substituir os 7 binários por aarch64 vindos do EVONIX v2.0 release
+          # (md5 conhecido: e984401d5f4af24b9f80aad95f21fdb9, 18MB).
+          AK3_AARCH64_URL="https://github.com/NEESCHAL-3/EVONIX-kernel/releases/download/v2.0/EVONIX-v2.0-RODIN.zip"
+          curl -fSL "$AK3_AARCH64_URL" -o /tmp/ak3-src.zip
+          [ -s /tmp/ak3-src.zip ] || { echo "[FAIL] EVONIX zip download failed/empty"; exit 1; }
+          mkdir -p /tmp/ak3-src && unzip -oq /tmp/ak3-src.zip -d /tmp/ak3-src
+          for t in busybox fec httools_static lptools_static magiskboot magiskpolicy snapshotupdater_static; do
+            [ -f "/tmp/ak3-src/tools/$t" ] || { echo "[FAIL] EVONIX zip missing tools/$t"; exit 1; }
+            cp "/tmp/ak3-src/tools/$t" tools/
+          done
+          chmod +x tools/*
+          echo "[+] 7 AnyKernel tools copied from EVONIX (will be validated in gate)"
+
+      - name: Write anykernel.sh + copy Image
+        run: |
+          cd "$GITHUB_WORKSPACE/ak3"
+          cat > anykernel.sh <<'EOF'
+          ### AnyKernel3 — Revenant v1.4.1
           properties() { '
-          kernel.string=Revenant Kernel v1.4 by Kaua
+          kernel.string=Revenant Kernel v1.4.1 by Kaua
           do.devicecheck=0
           do.modules=0
           do.systemless=1
@@ -367,42 +391,69 @@ jobs:
               write_boot;
           fi;
           EOF
-          cp dist/Image ak3/Image
-          cd ak3
-          zip -r9 "../Revenant-Beta-v1.4-${{ github.run_number }}.zip" * -x .git
+          cp "$GITHUB_WORKSPACE/dist/Image" Image
+
+      - name: Validate AnyKernel3 tools são aarch64 (gate antes de zipar)
+        run: |
+          cd "$GITHUB_WORKSPACE/ak3"
+          # Gate defensivo: se o step "Replace tools" falhou silenciosamente
+          # ou se EVONIX URL retornou conteudo errado, abortar AQUI antes de
+          # produzir zip impossivel de flashar.
+          FAIL=0
+          for f in tools/busybox tools/fec tools/httools_static tools/lptools_static tools/magiskboot tools/magiskpolicy tools/snapshotupdater_static; do
+            if ! file "$f" | grep -q "aarch64"; then
+              echo "[FAIL] $f não é aarch64:"
+              file "$f"
+              FAIL=1
+            fi
+          done
+          [ "$FAIL" -eq 0 ] || { echo "[FAIL] AnyKernel tools incorretas — não vai bootar via Horizon em rodin"; exit 1; }
+          echo "[+] Todas as 7 AnyKernel tools confirmadas aarch64"
+
+      - name: Zip AnyKernel3 (flashable)
+        run: |
+          cd "$GITHUB_WORKSPACE/ak3"
+          zip -r9 "../Revenant-Beta-v1.4.1-${{ github.run_number }}.zip" * -x .git
           cd ..
           ls -lh Revenant-Beta-*.zip
 
-      - name: Upload artifact
+      - name: Upload AnyKernel zip (flashable direto via Horizon)
         uses: actions/upload-artifact@v4
         with:
-          name: Revenant-Beta-v1.4-${{ github.run_number }}
-          path: |
-            Revenant-Beta-*.zip
-            dist/Image
+          name: Revenant-Beta-v1.4.1-${{ github.run_number }}-flashable
+          path: Revenant-Beta-*.zip
           retention-days: 30
+
+      - name: Upload Image raw (debug only)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Revenant-Image-v1.4.1-${{ github.run_number }}-debug
+          path: dist/Image
+          retention-days: 7
 
       - name: Create release
         if: ${{ inputs.release == true }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: Beta-v1.4
-          name: Revenant Beta v1.4
+          tag_name: Beta-v1.4.1
+          name: Revenant Beta v1.4.1
           body: |
             Build #${{ github.run_number }}
             Base: Linux 6.6.127 `android15-8-4k`
             KernelSU-Next + SuSFS v2.1.0 (cctv18/susfs4oki)
 
-            Fixes vs v1.3:
-            - **kernel/module/gki_module.c** — patch direto em `gki_is_module_protected_export()` (→ `false`) + `gki_is_module_unprotected_symbol()` (→ `true`).
-              Resolve `Protected symbol: device_find_any_child (err -13)` que travava `bluetooth.ko` em v1.3, cascade-falhando `bt_drv_6899` + CONNAC2 combo (WiFi+BT+GPS+FM).
-            - Strict verification step: build aborta se sed do gki_module.c não aplicou.
+            Fixes vs v1.4:
+            - **AnyKernel3 tools/ substituidas por aarch64** (eram 32-bit ARM EABI5).
+              Horizon Kernel Flasher agora aceita o zip sem `busybox setup failed`.
+            - Artifact upload **separado em 2** (flashable zip + raw Image debug).
+              Sem mais double-zip — baixa o `*-flashable` e flasha direto.
+            - Gate de validação que falha o build se tools/ não forem aarch64.
 
-            Mantém de v1.3:
-            - `--page_size=4k` flag → vermagic termina em `-4k`
-            - `CONFIG_MODULE_FORCE_LOAD=y` + patch kernel/module/{version,main}.c → CRC + vermagic bypass
-            - `android/abi_gki_protected_exports_*` esvaziado (complementar ao gki_module.c)
+            Mantém de v1.4 (kernel binário funcionalmente identico):
+            - `kernel/module/gki_module.c` overwrite — KMI bypass (BT+WiFi)
+            - `kernel/module/{version,main}.c` patches — CRC + vermagic bypass
+            - `--page_size=4k`, `android/abi_gki_protected_exports_*` empty
             - AnyKernel `block=boot` + conditional split_boot/flash_boot
-            - `do.devicecheck=0`
+            - KSU-Next 1d919700 + cctv18 SuSFS pinned ca1016d7d
           files: Revenant-Beta-*.zip
           prerelease: true
