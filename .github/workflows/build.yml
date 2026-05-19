@@ -26,6 +26,11 @@ env:
   SUSFS_OWNER: cctv18
   SUSFS_REPO: susfs4oki
   SUSFS_BRANCH: oki-android15-6.6
+  # v1.4: pin commit — cctv18 force-pushed 766a7f2 ("Sync with official KernelSU main repo")
+  # que rebaseou patches pra tiann/KernelSU upstream (incompativel com nosso
+  # KernelSU-Next pinned 1d919700...). ca1016d e o ultimo commit estavel
+  # antes desse breakage. Testado local: aplica clean em KSU 1d919700, 0 rejects.
+  SUSFS_COMMIT: ca1016d7d94f9570d800c50eb30d12fbdcc7d7ac
   SUSFS_HOST: github.com
   KSU_VERSION_FORCED: 33150
 
@@ -159,11 +164,17 @@ jobs:
           git checkout ${{ env.KSU_COMMIT }}
           echo "[+] KSU at $(git rev-parse --short HEAD): $(git log -1 --pretty=%s)"
 
-      - name: Clone ${{ env.SUSFS_OWNER }}/${{ env.SUSFS_REPO }} ${{ env.SUSFS_BRANCH }}
+      - name: Clone ${{ env.SUSFS_OWNER }}/${{ env.SUSFS_REPO }} at pinned commit
         run: |
           cd ws
-          git clone --depth=1 -b ${{ env.SUSFS_BRANCH }} \
+          # v1.4: clone full (no --depth=1) + checkout pinned SUSFS_COMMIT
+          # garante reproducibilidade. cctv18 force-push 766a7f2 quebrou KSU patch.
+          git clone -b ${{ env.SUSFS_BRANCH }} \
             https://${{ env.SUSFS_HOST }}/${{ env.SUSFS_OWNER }}/${{ env.SUSFS_REPO }}.git susfs
+          cd susfs
+          git checkout ${{ env.SUSFS_COMMIT }}
+          echo "[+] cctv18 at $(git rev-parse --short HEAD): $(git log -1 --pretty=%s)"
+          cd ..
           ls susfs/kernel_patches/
 
       - name: Copy SuSFS source files BEFORE patch
