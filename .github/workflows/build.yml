@@ -96,6 +96,61 @@ jobs:
           echo "[+] Protected exports filter EMPTIED — kernel exports unrestricted"
           ls -lh android/abi_gki_protected_exports_*
 
+      - name: Patch kernel/module/gki_module.c (v1.4 ROOT FIX BT/WiFi)
+        run: |
+          cd ws/common
+          # v1.3 bootou mas WiFi+BT quebrados. dmesg evidence:
+          #   bluetooth: Protected symbol: device_find_any_child (err -13)
+          # GKI 2.0 tem 2o mecanismo de KMI symbol filtering em kernel/module/gki_module.c:
+          #   gki_is_module_protected_export() — bloqueia symbol EXPORT
+          #   gki_is_module_unprotected_symbol() — bloqueia symbol ACCESS
+          # Ambos checam header gerado <generated/gki_module_unprotected.h>:
+          #   se NR_UNPROTECTED_SYMBOLS != 0 → enforce via bsearch
+          # v1.2 esvaziou android/abi_gki_protected_exports_* mas isso só afeta UMA
+          # das duas listas. Header gerado vem de outra fonte (Kleaf).
+          # Fix robusto: patch direto nas 2 funcoes → return false/true sempre.
+          # Resultado: bluetooth.ko carrega → bt_drv_6899 ok → CONNAC2 combo
+          # liga → WiFi+BT funcionam.
+          python3 - <<'PYEOF'
+          import re, sys
+          p = 'kernel/module/gki_module.c'
+          src = open(p).read()
+
+          def replace_body(src, fn_name, new_body):
+              pat = re.compile(r'(bool\s+' + re.escape(fn_name) + r'\s*\([^)]*\)\s*)\{', re.MULTILINE)
+              m = pat.search(src)
+              if not m:
+                  print(f'[FAIL] function {fn_name} not found', file=sys.stderr)
+                  sys.exit(1)
+              brace_open = m.end() - 1
+              depth = 0
+              for i in range(brace_open, len(src)):
+                  c = src[i]
+                  if c == '{': depth += 1
+                  elif c == '}':
+                      depth -= 1
+                      if depth == 0:
+                          return src[:brace_open] + '{\n\t(void)name;\n\t' + new_body + '\n}' + src[i+1:]
+              print(f'[FAIL] unbalanced braces in {fn_name}', file=sys.stderr)
+              sys.exit(1)
+
+          src = replace_body(src, 'gki_is_module_protected_export', 'return false; /* v1.4 KMI bypass */')
+          src = replace_body(src, 'gki_is_module_unprotected_symbol', 'return true; /* v1.4 KMI bypass */')
+          open(p, 'w').write(src)
+          print('[+] gki_module.c patched')
+          PYEOF
+          # Strict verification — fail build if patches did NOT stick
+          grep -q "return false; /\* v1.4 KMI bypass" kernel/module/gki_module.c || { echo "[FAIL] protected_export patch missing"; exit 1; }
+          grep -q "return true; /\* v1.4 KMI bypass" kernel/module/gki_module.c || { echo "[FAIL] unprotected_symbol patch missing"; exit 1; }
+          # Confirm bsearch removed from public funcs (cmp_name still present is OK — static helper)
+          if grep -q "bsearch(name, gki_" kernel/module/gki_module.c; then
+            echo "[FAIL] residual bsearch call in public funcs"
+            exit 1
+          fi
+          echo "[+] gki_module.c patch verified — both KMI guards neutralized"
+          echo "=== final file ==="
+          cat kernel/module/gki_module.c
+
       - name: Clone KernelSU-Next at commit ${{ env.KSU_COMMIT }}
         run: |
           cd ws
@@ -259,9 +314,9 @@ jobs:
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
           rm -rf ak3/.git ak3/README.md
           cat > ak3/anykernel.sh <<'EOF'
-          ### AnyKernel3 — Revenant v1.3
+          ### AnyKernel3 — Revenant v1.4
           properties() { '
-          kernel.string=Revenant Kernel v1.3 by Kaua
+          kernel.string=Revenant Kernel v1.4 by Kaua
           do.devicecheck=0
           do.modules=0
           do.systemless=1
@@ -289,14 +344,14 @@ jobs:
           EOF
           cp dist/Image ak3/Image
           cd ak3
-          zip -r9 "../Revenant-Beta-v1.3-${{ github.run_number }}.zip" * -x .git
+          zip -r9 "../Revenant-Beta-v1.4-${{ github.run_number }}.zip" * -x .git
           cd ..
           ls -lh Revenant-Beta-*.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Revenant-Beta-v1.3-${{ github.run_number }}
+          name: Revenant-Beta-v1.4-${{ github.run_number }}
           path: |
             Revenant-Beta-*.zip
             dist/Image
@@ -306,16 +361,23 @@ jobs:
         if: ${{ inputs.release == true }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: Beta-v1.3
-          name: Revenant Beta v1.3
+          tag_name: Beta-v1.4
+          name: Revenant Beta v1.4
           body: |
             Build #${{ github.run_number }}
             Base: Linux 6.6.127 `android15-8-4k`
             KernelSU-Next + SuSFS v2.1.0 (cctv18/susfs4oki)
-            Fixes vs v1.0:
-            - `--page_size=4k` flag → vermagic agora termina em `-4k`
-            - `CONFIG_MODULE_FORCE_LOAD=y` → bypass CRC mismatch dos vendor modules MTK
-            - AnyKernel `block=boot` (rodin layout, era init_boot)
-            - `do.devicecheck=0` (alinha com EVONIX, evita falsa rejeição)
+
+            Fixes vs v1.3:
+            - **kernel/module/gki_module.c** — patch direto em `gki_is_module_protected_export()` (→ `false`) + `gki_is_module_unprotected_symbol()` (→ `true`).
+              Resolve `Protected symbol: device_find_any_child (err -13)` que travava `bluetooth.ko` em v1.3, cascade-falhando `bt_drv_6899` + CONNAC2 combo (WiFi+BT+GPS+FM).
+            - Strict verification step: build aborta se sed do gki_module.c não aplicou.
+
+            Mantém de v1.3:
+            - `--page_size=4k` flag → vermagic termina em `-4k`
+            - `CONFIG_MODULE_FORCE_LOAD=y` + patch kernel/module/{version,main}.c → CRC + vermagic bypass
+            - `android/abi_gki_protected_exports_*` esvaziado (complementar ao gki_module.c)
+            - AnyKernel `block=boot` + conditional split_boot/flash_boot
+            - `do.devicecheck=0`
           files: Revenant-Beta-*.zip
           prerelease: true
